@@ -599,7 +599,11 @@ void PhysXParticleFluid3D::_make_fluid() {
 		WARN_PRINT_ONCE("PhysXParticleFluid3D does nothing unless the 3D physics engine is set to \"PhysX\".");
 		return;
 	}
-	ERR_FAIL_NULL(get_world_3d());
+	// Godot 4.7 deleted Ref<T>::operator==(std::nullptr_t); use is_valid().
+	if (!get_world_3d().is_valid()) {
+		WARN_PRINT_ONCE("PhysXParticleFluid3D does nothing until it is in a scene with a valid 3D world.");
+		return;
+	}
 
 	fluid = server->particle_fluid_create();
 	server->particle_fluid_set_space(fluid, get_world_3d()->get_space());
