@@ -34,6 +34,7 @@
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "drivers/d3d12/d3d12_hooks.h"
+#include "perf/xr_frame_tickers.h" // PERF: [XRT] frame-segment instrumentation
 #include "drivers/d3d12/rendering_context_driver_d3d12.h"
 
 #include <drivers/d3d12/godot_d3d12ma.h>
@@ -2471,10 +2472,12 @@ RDD::CommandQueueID RenderingDeviceDriverD3D12::command_queue_create(CommandQueu
 
 Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) {
 	CommandQueueInfo *command_queue = (CommandQueueInfo *)(p_cmd_queue.id);
+	XRPT::Scoper pt_fence(&XRPT::seg_fence); // PERF: GPU-fence wait (previous frame)
 	for (uint32_t i = 0; i < p_wait_semaphores.size(); i++) {
 		const SemaphoreInfo *semaphore = (const SemaphoreInfo *)(p_wait_semaphores[i].id);
 		command_queue->d3d_queue->Wait(semaphore->d3d_fence.Get(), semaphore->fence_value);
 	}
+	pt_fence.stop(); // PERF
 
 	if (p_cmd_buffers.size() > 0) {
 		thread_local LocalVector<ID3D12CommandList *> command_lists;
@@ -2503,6 +2506,7 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 	bool any_present_failed = false;
 	for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 		SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+		XRPT::Scoper pt_present(&XRPT::seg_present); // PERF
 		res = swap_chain->d3d_swap_chain->Present(swap_chain->sync_interval, swap_chain->present_flags);
 		if (!SUCCEEDED(res)) {
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
