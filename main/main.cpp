@@ -53,6 +53,7 @@
 #include "core/object/script_language.h"
 #include "core/os/os.h"
 #include "core/os/process_id.h"
+#include "perf/xr_frame_tickers.h" // PERF: [XRT] frame-segment instrumentation
 #include "core/os/time.h"
 #include "core/profiling/profiling.h"
 #include "core/register_core_types.h"
@@ -4966,6 +4967,8 @@ bool Main::iteration() {
 	XRServer::get_singleton()->_process();
 #endif // XR_DISABLED
 
+	XRPT::Scoper pt_cpu(&XRPT::seg_cpu); // PERF: physics + _process up to draw
+
 	GodotProfileZoneGrouped(_profile_zone, "physics");
 	for (int iters = 0; iters < advance.physics_steps; ++iters) {
 		GodotProfileZone("Physics Step");
@@ -5077,6 +5080,7 @@ bool Main::iteration() {
 	RenderingServer::get_singleton()->sync(); //sync if still drawing from previous frames.
 
 	GodotProfileZoneGrouped(_profile_zone, "RenderingServer::draw");
+	pt_cpu.stop(); // PERF: CPU segment ends before draw
 	const bool has_pending_resources_for_processing = RD::get_singleton() && RD::get_singleton()->has_pending_resources_for_processing();
 	bool wants_present = (DisplayServer::get_singleton()->can_any_window_draw() ||
 								 DisplayServer::get_singleton()->has_additional_outputs()) &&
@@ -5086,16 +5090,19 @@ bool Main::iteration() {
 		wants_present |= force_redraw_requested;
 		if ((!force_redraw_requested) && OS::get_singleton()->is_in_low_processor_usage_mode()) {
 			if (RenderingServer::get_singleton()->has_changed()) {
+				XRPT::Scoper pt_draw(&XRPT::seg_draw); // PERF
 				RenderingServer::get_singleton()->draw(wants_present, scaled_step); // flush visual commands
 				Engine::get_singleton()->increment_frames_drawn();
 			}
 		} else {
+			XRPT::Scoper pt_draw(&XRPT::seg_draw); // PERF
 			RenderingServer::get_singleton()->draw(wants_present, scaled_step); // flush visual commands
 			Engine::get_singleton()->increment_frames_drawn();
 			force_redraw_requested = false;
 		}
 	}
 
+	XRPT::frame_done(); // PERF: [XRT] line + reset accumulators
 	process_ticks = OS::get_singleton()->get_ticks_usec() - process_begin;
 	process_max = MAX(process_ticks, process_max);
 	uint64_t frame_time = OS::get_singleton()->get_ticks_usec() - ticks;

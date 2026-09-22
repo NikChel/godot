@@ -48,6 +48,7 @@
 #endif
 
 #include "openxr_platform_inc.h" // IWYU pragma: keep.
+#include "perf/xr_frame_tickers.h" // PERF: [XRT] frame-segment instrumentation
 
 #ifdef VULKAN_ENABLED
 #include "extensions/platform/openxr_vulkan_extension.h"
@@ -2373,7 +2374,11 @@ bool OpenXRAPI::process() {
 	frame_state.predictedDisplayPeriod = 0;
 	frame_state.shouldRender = false;
 
-	XrResult result = xrWaitFrame(session, &frame_wait_info, &frame_state);
+	XrResult result;
+	{
+		XRPT::Scoper pt_wait(&XRPT::seg_wait); // PERF
+		result = xrWaitFrame(session, &frame_wait_info, &frame_state);
+	}
 	if (XR_FAILED(result)) {
 		print_line("OpenXR: xrWaitFrame() was not successful [", get_error_string(result), "]");
 
@@ -2701,7 +2706,10 @@ void OpenXRAPI::end_frame() {
 			0, // layerCount
 			nullptr // layers
 		};
-		result = xrEndFrame(session, &frame_end_info);
+		{
+			XRPT::Scoper pt_end(&XRPT::seg_end); // PERF
+			result = xrEndFrame(session, &frame_end_info);
+		}
 		if (XR_FAILED(result)) {
 			print_line("OpenXR: rendering skipped and failed to end frame! [", get_error_string(result), "]");
 			return;
@@ -2809,7 +2817,10 @@ void OpenXRAPI::end_frame() {
 		static_cast<uint32_t>(layers_list.size()), // layerCount
 		layers_list.ptr() // layers
 	};
-	result = xrEndFrame(session, &frame_end_info);
+	{
+		XRPT::Scoper pt_end(&XRPT::seg_end); // PERF
+		result = xrEndFrame(session, &frame_end_info);
+	}
 	if (XR_FAILED(result)) {
 		print_line("OpenXR: failed to end frame! [", get_error_string(result), "]");
 		return;
