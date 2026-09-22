@@ -15,6 +15,9 @@
 //   steps   - exact number of fixed physics steps in this frame
 //             (MainTimerSync accumulator, main_timer_sync.cpp:356)
 //   per_step- phys / steps: cost of one 11.11 ms fixed step, ms
+//   eng     -   inside phys: PhysicsServer3D/2D sync + step (engine/PhysX layer)
+//   scn     -   inside phys: main_loop->physics_process (scene _physics_process)
+//   rest    -   remainder of each step (iteration prepare/end, nav, flushes)
 //   proc    - main_loop->process (_process) + message queue flush
 //   glue    - remainder between XR process and draw (events, RS::sync, ...)
 //   draw    - RenderingServer::draw: scene update + draw_viewports +
@@ -41,6 +44,8 @@ inline std::atomic<uint64_t> seg_present{0};
 inline std::atomic<uint64_t> seg_end{0};
 inline std::atomic<uint64_t> seg_post{0};  // rest of OpenXRAPI::process (poses/views)
 inline std::atomic<uint64_t> seg_phys{0};  // full physics loop (all fixed steps)
+inline std::atomic<uint64_t> seg_phys_eng{0}; // inside phys: PhysicsServer3D/2D sync+step (engine layer)
+inline std::atomic<uint64_t> seg_phys_scn{0}; // inside phys: main_loop->physics_process (scene callbacks)
 inline std::atomic<uint64_t> seg_proc{0};  // main_loop->process + message flush
 inline std::atomic<int> seg_steps{0};      // physics steps of this frame (advance.physics_steps)
 inline std::atomic<int> frame_counter{0};
@@ -93,8 +98,16 @@ inline void frame_done() {
 	double g = glue_usec / 1000.0;
 	int st = seg_steps.load();
 	double per_step = (st > 0) ? phys / (double)st : 0.0;
+	double eng = seg_phys_eng.load() / 1000.0;
+	double scn = seg_phys_scn.load() / 1000.0;
+	// rest of each fixed step: iteration_prepare, nav, message flush, iteration_end
+	int64_t rest_usec = (int64_t)seg_phys.load() - (int64_t)seg_phys_eng.load() - (int64_t)seg_phys_scn.load();
+	if (rest_usec < 0) {
+		rest_usec = 0;
+	}
+	double rest = rest_usec / 1000.0;
 	if (emit) {
-		print_line(vformat("[XRT] f=%05d wait=%.1f post=%.1f phys=%.1f steps=%d per_step=%.2f proc=%.1f glue=%.1f draw=%.1f (fence=%.2f present=%.2f end=%.1f)", n, w, post, phys, st, per_step, proc, g, d, f, p, e));
+		print_line(vformat("[XRT] f=%05d wait=%.1f post=%.1f phys=%.1f steps=%d per_step=%.2f [eng=%.1f scn=%.1f rest=%.1f] proc=%.1f glue=%.1f draw=%.1f (fence=%.2f present=%.2f end=%.1f)", n, w, post, phys, st, per_step, eng, scn, rest, proc, g, d, f, p, e));
 	}
 	seg_wait = 0;
 	seg_cpu = 0;
@@ -104,6 +117,8 @@ inline void frame_done() {
 	seg_end = 0;
 	seg_post = 0;
 	seg_phys = 0;
+	seg_phys_eng = 0;
+	seg_phys_scn = 0;
 	seg_proc = 0;
 	seg_steps = 0;
 }
