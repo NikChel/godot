@@ -5056,6 +5056,7 @@ bool Main::iteration() {
 		Engine::get_singleton()->_in_physics = false;
 	}
 	pt_phys.stop(); // PERF
+	XRPT::seg_steps += (int)advance.physics_steps; // PERF: exact step count of this frame
 
 	if (Input::get_singleton()->is_agile_input_event_flushing()) {
 		Input::get_singleton()->flush_buffered_events();
