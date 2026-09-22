@@ -4989,6 +4989,8 @@ bool Main::iteration() {
 		GodotProfileZoneGrouped(_physics_zone, "main loop iteration prepare");
 		OS::get_singleton()->get_main_loop()->iteration_prepare();
 
+	{
+		XRPT::Scoper pt_eng1(&XRPT::seg_phys_eng); // PERF: engine sync
 #ifndef PHYSICS_3D_DISABLED
 		GodotProfileZoneGrouped(_physics_zone, "PhysicsServer3D::sync");
 		PhysicsServer3D::get_singleton()->sync();
@@ -5000,19 +5002,23 @@ bool Main::iteration() {
 		PhysicsServer2D::get_singleton()->sync();
 		PhysicsServer2D::get_singleton()->flush_queries();
 #endif // PHYSICS_2D_DISABLED
+	}
 
 		GodotProfileZoneGrouped(_physics_zone, "physics_process");
-		if (OS::get_singleton()->get_main_loop()->physics_process(physics_step * time_scale)) {
+		{
+			XRPT::Scoper pt_scn(&XRPT::seg_phys_scn); // PERF: scene _physics_process callbacks
+			if (OS::get_singleton()->get_main_loop()->physics_process(physics_step * time_scale)) {
 #ifndef PHYSICS_3D_DISABLED
-			PhysicsServer3D::get_singleton()->end_sync();
+				PhysicsServer3D::get_singleton()->end_sync();
 #endif // PHYSICS_3D_DISABLED
 #ifndef PHYSICS_2D_DISABLED
-			PhysicsServer2D::get_singleton()->end_sync();
+				PhysicsServer2D::get_singleton()->end_sync();
 #endif // PHYSICS_2D_DISABLED
 
-			Engine::get_singleton()->_in_physics = false;
-			exit = true;
-			break;
+				Engine::get_singleton()->_in_physics = false;
+				exit = true;
+				break;
+			}
 		}
 
 #if !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
@@ -5033,6 +5039,8 @@ bool Main::iteration() {
 		message_queue->flush();
 #endif // !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
 
+	{
+		XRPT::Scoper pt_eng2(&XRPT::seg_phys_eng); // PERF: engine step
 #ifndef PHYSICS_3D_DISABLED
 		GodotProfileZoneGrouped(_profile_zone, "3D physics");
 		PhysicsServer3D::get_singleton()->end_sync();
@@ -5044,6 +5052,7 @@ bool Main::iteration() {
 		PhysicsServer2D::get_singleton()->end_sync();
 		PhysicsServer2D::get_singleton()->step(physics_step * time_scale);
 #endif // PHYSICS_2D_DISABLED
+	}
 
 		message_queue->flush();
 
