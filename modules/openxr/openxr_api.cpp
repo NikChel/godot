@@ -2379,6 +2379,7 @@ bool OpenXRAPI::process() {
 		XRPT::Scoper pt_wait(&XRPT::seg_wait); // PERF
 		result = xrWaitFrame(session, &frame_wait_info, &frame_state);
 	}
+	XRPT::Scoper pt_post(&XRPT::seg_post); // PERF: rest of process (play space / view poses)
 	if (XR_FAILED(result)) {
 		print_line("OpenXR: xrWaitFrame() was not successful [", get_error_string(result), "]");
 
