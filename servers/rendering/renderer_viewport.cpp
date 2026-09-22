@@ -865,6 +865,18 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 
 		Viewport *vp = sorted_active_viewports[i];
 
+#ifndef XR_DISABLED
+		// PERF A/B (v5): skip desktop (non-XR) viewport rendering while an XR session is active
+		if (vp->use_xr == false && xr_interface.is_valid()) {
+			static bool desktop_mirror_skip_printed = false;
+			if (!desktop_mirror_skip_printed) {
+				desktop_mirror_skip_printed = true;
+				print_line("[XRT] A/B: desktop viewport rendering skipped (XR session active)");
+			}
+			continue;
+		}
+#endif // XR_DISABLED
+
 		if (vp->last_pass != draw_viewports_pass) {
 			continue; //should not draw
 		}
