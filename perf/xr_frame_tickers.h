@@ -8,15 +8,19 @@
 // render thread; in create_thread mode the fence/present/end segments belong
 // to the render thread and the printed frame mixes threads).
 //
-// Segments (main thread, usec), printed as [XRT] line every 10th frame:
+// Segments (main thread, ms), printed as [XRT] line every 10th frame:
 //   wait    - xrWaitFrame (OpenXRAPI::process): align to 120 Hz tick
-//   cpu     - physics + _process between XR wait and draw (main loop)
+//   post    - rest of OpenXRAPI::process (play space / view poses / foveation)
+//   phys    - full physics loop (all fixed steps of the frame)
+//   proc    - main_loop->process (_process) + message queue flush
+//   glue    - remainder between XR process and draw (events, RS::sync, ...)
 //   draw    - RenderingServer::draw: scene update + draw_viewports +
 //             rasterizer end_frame (D3D12 execute) + xrEndFrame
 //   fence   -   D3D12 command_queue Wait (GPU-fence of the previous frame)
 //   present -   D3D12 swap-chain Present (desktop mirror; the XR swapchain is
 //               presented by the Oculus runtime inside xrEndFrame)
 //   end     -   xrEndFrame (Oculus runtime: composite + upscale + Link encode)
+// Serial frame time ~= wait + post + phys + proc + glue + draw.
 
 #include <atomic>
 
@@ -32,6 +36,9 @@ inline std::atomic<uint64_t> seg_draw{0};
 inline std::atomic<uint64_t> seg_fence{0};
 inline std::atomic<uint64_t> seg_present{0};
 inline std::atomic<uint64_t> seg_end{0};
+inline std::atomic<uint64_t> seg_post{0};  // rest of OpenXRAPI::process (poses/views)
+inline std::atomic<uint64_t> seg_phys{0};  // full physics loop (all fixed steps)
+inline std::atomic<uint64_t> seg_proc{0};  // main_loop->process + message flush
 inline std::atomic<int> frame_counter{0};
 
 inline uint64_t now_usec() {
@@ -67,13 +74,21 @@ inline void frame_done() {
 	int n = frame_counter.fetch_add(1) + 1;
 	bool emit = (n % 10 == 0);
 	double w = seg_wait.load() / 1000.0;
-	double c = seg_cpu.load() / 1000.0;
+	double post = seg_post.load() / 1000.0;
+	double phys = seg_phys.load() / 1000.0;
+	double proc = seg_proc.load() / 1000.0;
 	double d = seg_draw.load() / 1000.0;
 	double f = seg_fence.load() / 1000.0;
 	double p = seg_present.load() / 1000.0;
 	double e = seg_end.load() / 1000.0;
+	// glue: everything else inside the cpu segment (event flushes, RS::sync, ...)
+	int64_t glue_usec = (int64_t)seg_cpu.load() - (int64_t)seg_phys.load() - (int64_t)seg_proc.load();
+	if (glue_usec < 0) {
+		glue_usec = 0;
+	}
+	double g = glue_usec / 1000.0;
 	if (emit) {
-		print_line(vformat("[XRT] f=%05d wait=%.1f cpu=%.1f draw=%.1f (fence=%.2f present=%.2f end=%.1f)", n, w, c, d, f, p, e));
+		print_line(vformat("[XRT] f=%05d wait=%.1f post=%.1f phys=%.1f proc=%.1f glue=%.1f draw=%.1f (fence=%.2f present=%.2f end=%.1f)", n, w, post, phys, proc, g, d, f, p, e));
 	}
 	seg_wait = 0;
 	seg_cpu = 0;
@@ -81,6 +96,9 @@ inline void frame_done() {
 	seg_fence = 0;
 	seg_present = 0;
 	seg_end = 0;
+	seg_post = 0;
+	seg_phys = 0;
+	seg_proc = 0;
 }
 
 } // namespace XRPT

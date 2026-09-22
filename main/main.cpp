@@ -4970,6 +4970,7 @@ bool Main::iteration() {
 	XRPT::Scoper pt_cpu(&XRPT::seg_cpu); // PERF: physics + _process up to draw
 
 	GodotProfileZoneGrouped(_profile_zone, "physics");
+	XRPT::Scoper pt_phys(&XRPT::seg_phys); // PERF
 	for (int iters = 0; iters < advance.physics_steps; ++iters) {
 		GodotProfileZone("Physics Step");
 		GodotProfileZoneGroupedFirst(_physics_zone, "setup");
@@ -5054,6 +5055,7 @@ bool Main::iteration() {
 
 		Engine::get_singleton()->_in_physics = false;
 	}
+	pt_phys.stop(); // PERF
 
 	if (Input::get_singleton()->is_agile_input_event_flushing()) {
 		Input::get_singleton()->flush_buffered_events();
@@ -5062,10 +5064,13 @@ bool Main::iteration() {
 	uint64_t process_begin = OS::get_singleton()->get_ticks_usec();
 
 	GodotProfileZoneGrouped(_profile_zone, "process");
-	if (OS::get_singleton()->get_main_loop()->process(process_step * time_scale)) {
-		exit = true;
+	{
+		XRPT::Scoper pt_proc(&XRPT::seg_proc); // PERF
+		if (OS::get_singleton()->get_main_loop()->process(process_step * time_scale)) {
+			exit = true;
+		}
+		message_queue->flush();
 	}
-	message_queue->flush();
 
 #ifndef NAVIGATION_2D_DISABLED
 	GodotProfileZoneGrouped(_profile_zone, "process 2D navigation");
