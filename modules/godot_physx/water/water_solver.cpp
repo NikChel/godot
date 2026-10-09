@@ -1224,6 +1224,9 @@ void WaterSolver::recenter(Vector2 p_grid_center) {
 }
 
 void WaterSolver::configure(const Settings &p_settings) {
+	if (gpu.is_null()) {
+		return;
+	}
 	settings = p_settings;
 	for (SphereSlot &s : sphere_slots) {
 		s = SphereSlot();
