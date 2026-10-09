@@ -73,9 +73,10 @@ if physx_gpu:
 
 # PhysX headers are C++14-clean but trip some of Godot's stricter warnings.
 if env.msvc:
-    # C4456 (local declaration hides previous): new upstream water/vehicle
-    # nodes under dev_mode /W4 /WX (caught 2026-10-09, physx_water_spray_3d).
-    env_physx.Append(CXXFLAGS=["/wd4100", "/wd4201", "/wd4245", "/wd4324", "/wd4456"])
+    # New upstream water/vehicle/flow code under dev_mode /W4 /WX
+    # (caught 2026-10-09): C4456 (local hides previous, physx_water_spray_3d),
+    # C4838 (narrowing conversion, water_wake_solver).
+    env_physx.Append(CXXFLAGS=["/wd4100", "/wd4201", "/wd4245", "/wd4324", "/wd4456", "/wd4838"])
 else:
     env_physx.Append(CXXFLAGS=["-Wno-unused-parameter"])
 
