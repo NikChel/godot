@@ -298,7 +298,16 @@ env_physx.add_source_files(module_obj, "*.cpp")
 if blast_sdk:
     env_physx.add_source_files(module_obj, "blast/*.cpp")
 if flow_sdk:
-    env_physx.add_source_files(module_obj, "flow/*.cpp")
+    # Godot compiles MSVC with /W4 /WX: NvFlowLoader.h is full of static
+    # helpers, so any flow TU that does not reference one of them gets
+    # C4505 ("unreferenced function with internal linkage") promoted to a
+    # hard error. Silence just that one warning for the flow TUs.
+    if env["platform"] == "windows" and env.msvc:
+        _flow_env = env_physx.Clone()
+        _flow_env.Append(CXXFLAGS=["/wd4505"])
+        _flow_env.add_source_files(module_obj, "flow/*.cpp")
+    else:
+        env_physx.add_source_files(module_obj, "flow/*.cpp")
 # Character cloth compute pass (any GPU) -- self-contained, no shared include.
 env_physx.GLSL_HEADER(os.path.join("cloth", "skinned_cloth.glsl"))
 env_physx.add_source_files(module_obj, "cloth/*.cpp")
