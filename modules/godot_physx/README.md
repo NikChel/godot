@@ -11,6 +11,15 @@ hardware, and the room that a built-in backend leaves for GPU particle,
 destruction and fluid effects that have no representation in the stock physics
 interface. On the CPU alone, Jolt is the better choice.
 
+## Example project and tests
+
+Scenes and a regression-test suite for the module live in a separate Godot
+project: [godot-physx-example](https://github.com/uno1982/godot-physx-example).
+`demo/...` paths referenced in this document (such as the demo boat,
+`demo/common/boat/boat.tscn`) are relative to that repository. Its `test/`
+directory holds per-feature tests that run headless against a custom build;
+see the project's README for the run instructions.
+
 ## Building
 
 The PhysX 5 SDK is **not vendored** — it is built out of tree and linked in. The
@@ -27,37 +36,25 @@ Visual Studio with the C++ workload and Windows SDK, the D3D12 Agility SDK):
   12.8. On Windows: `winget install Nvidia.CUDA --version 12.8` (installs to
   `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8` and sets
   `CUDA_PATH`; open a fresh terminal afterwards). The end-user machine only
-  needs an NVIDIA driver (`nvcuda.dll`), not the toolkit.
+  needs an NVIDIA driver (`nvcuda.dll` / `libcuda.so.1`), not the toolkit.
+  CUDA 13 works too, but needs a newer driver (R580+) and drops `sm_70`, so
+  stick with 12.8.
 
-Win64 / MSVC is the only build that has actually been run and tested. A Linux
-build has been *prepped but not verified* — `SCsub` has a `linuxbsd` branch and
-`misc/physx_presets/linux64-godot[-gpu].xml` presets exist, and
-`build_physx.py --platform linuxbsd` will attempt it, but nobody has run it
-against a real Linux toolchain yet. If you're the first to try, treat these as
-the checklist of what's still unconfirmed:
+On **Linux**, on top of a normal Godot Linux editor build: **CMake**, **git**
+and **clang** (the PhysX SDK is built with clang even when Godot itself is built
+with GCC, the two link together fine). Tested with clang 18 and 22, and GCC
+13 and 16 for Blast. For GPU builds nvcc might want an older GCC, point it
+there with `NVCC_CCBIN` (Arch's `cuda` package already does).
 
-- **Preset acceptance** — `linux64-godot.xml` uses `targetPlatform="linux"
-  compiler="clang"`, matching PhysX's own public preset naming from memory, not
-  from a tested run against this pinned `PHYSX_REF`. If `generate_projects.sh`
-  rejects it, check `physx/buildtools/presets/public/` in the cloned checkout
-  for the exact accepted spelling.
-- **Install `bin/` layout** — `SCsub` and `build_physx.py` guess
-  `bin/linux.clang.x86_64/release` for the static `.a` libraries (by analogy
-  with Windows' `bin/win.x86_64.vc143.mt/release`). Confirm this against what
-  the build actually installs and fix both files if it differs.
-- **GPU link mechanism** — the Windows GPU build links an import lib
-  (`PhysXGpu_64.lib`) for a DLL loaded at runtime; whether Linux needs the
-  equivalent `-lPhysXGpu_64` against `libPhysXGpu_64.so`, an rpath/
-  `LD_LIBRARY_PATH` entry instead, or nothing at link time at all (pure
-  `dlopen`) hasn't been checked.
-- The two bundled `misc/physx_patches/` (heightfield GPU boundary crash, Turing
-  `sm_75` SASS) are platform-generic source/CMake changes, not Windows-specific,
-  so they should apply and matter the same way on Linux — but that's also
-  unverified.
+Win64 / MSVC and Linux x86-64 are built and tested, CPU and GPU, with and
+without Blast and Flow. On Linux `SCsub` copies `libPhysXGpu_64.so` and the
+Blast and Flow `.so` files next to the binary and sets an `$ORIGIN` rpath so
+they're found.
 
-CPU-only static libraries otherwise link the same way SCons resolves any Unix
-lib (`env.Append(LIBS=...)`), so the Linux CPU path is the smaller lift; the
-GPU/CUDA path is the bigger unknown.
+The `.so` files need the glibc of the machine that built them (or newer), so
+build release SDKs on an older distro, not a rolling one. The
+`nvidia/cuda:12.8.1-devel-ubuntu24.04` docker image works for both the GPU
+and Blast builds.
 
 ### Step 1 — build the PhysX SDK
 
@@ -85,11 +82,14 @@ with `physx_sdk=<path>` or the `PHYSX_SDK` environment variable.
 ```
 scons platform=windows target=editor physx_sdk=<path from step 1>            # CPU
 scons platform=windows target=editor physx_sdk=<path> physx_gpu=yes          # GPU
+scons platform=linuxbsd target=editor physx_sdk=<path from step 1>           # Linux (CPU)
+scons platform=linuxbsd target=editor physx_sdk=<path> physx_gpu=yes         # Linux (GPU)
 ```
 
-For a **GPU** build, `SCsub` also copies `PhysXGpu_64.dll` next to the built
-binary automatically (a real SCons dependency, keyed on `physx_sdk=`'s own
-DLL — it only re-copies when that changes, not on every build).
+For a **GPU** build, `SCsub` also copies `PhysXGpu_64.dll` (`libPhysXGpu_64.so`
+on Linux) next to the built binary automatically (a real SCons dependency,
+keyed on `physx_sdk=`'s own library — it only re-copies when that changes,
+not on every build).
 
 At startup a GPU build logs `PhysX: CUDA context ready on device '...'`; if no
 usable CUDA device is found it warns and falls back to CPU simulation.
@@ -122,14 +122,20 @@ python modules/godot_physx/misc/build_physx.py --gpu --blast    # + GPU PhysX
 
 This builds PhysX as usual, then also runs Blast's own `build.bat`/`build.sh`
 and prints the resulting SDK path plus the exact `scons` command for step 2.
-Unlike PhysX's static libraries, Blast ships as DLLs (`NvBlast`,
-`NvBlastGlobals`, `NvBlastExtAuthoring`, `NvBlastExtShaders`) — `SCsub` copies
-all four next to the built binary automatically when `blast_sdk=` is set,
-the same way it does for `PhysXGpu_64.dll` above.
+Unlike PhysX's static libraries, Blast ships as DLLs (`.so` on Linux):
+`NvBlast`, `NvBlastGlobals`, `NvBlastExtAuthoring`, `NvBlastExtShaders`.
+`SCsub` copies all four next to the built binary when `blast_sdk=` is set,
+same as the GPU library above.
+
+On Linux Blast is built with your own GCC instead of NVIDIA's build
+container (`build.sh --no-docker`, patch 0005 makes that work). The first run
+downloads about 3 GB of deps into `~/.cache/packman`.
 
 ```
 scons platform=windows target=editor physx_sdk=<path> blast_sdk=<path from --blast>            # CPU
 scons platform=windows target=editor physx_sdk=<path> physx_gpu=yes blast_sdk=<path from --blast>  # GPU
+scons platform=linuxbsd target=editor physx_sdk=<path> blast_sdk=<path from --blast>           # Linux (CPU)
+scons platform=linuxbsd target=editor physx_sdk=<path> physx_gpu=yes blast_sdk=<path from --blast> # Linux (GPU)
 ```
 
 To build the SDK by hand instead: point scons at the Blast install directory
@@ -139,6 +145,40 @@ To build the SDK by hand instead: point scons at the Blast install directory
 To confirm a Blast-less build still works, build with `physx_sdk=` set but no
 `blast_sdk=` — `PhysXDestructible3D` and the fracture dialog simply won't be
 registered.
+
+### Optional — NVIDIA Flow (`PhysXFlow3D`)
+
+Smoke, fire and dust (`PhysXFlow3D`, `PhysXFlowEmitter3D`) need NVIDIA Flow,
+the `flow/` subdirectory of the same PhysX monorepo. Like Blast it is entirely
+optional: without `flow_sdk=` the Flow nodes simply aren't registered, and
+scenes that use them open with placeholders.
+
+```
+python modules/godot_physx/misc/build_physx.py --flow                  # + CPU-only PhysX
+python modules/godot_physx/misc/build_physx.py --gpu --blast --flow    # everything
+```
+
+This runs Flow's own `build.bat`/`build.sh` after PhysX (and Blast), and ends
+with one `scons` command for everything built, e.g.:
+
+```
+scons platform=windows target=editor physx_sdk=<path> physx_gpu=yes blast_sdk=<path> flow_sdk=<PhysX checkout>/flow
+```
+
+`flow_sdk=` is the checkout's `flow/` directory itself. To build Flow by hand,
+run its script from that directory; MSVC 14.44 needs warning C4756 silenced
+(the script does this for you):
+
+```
+cd <PhysX checkout>/flow
+set CL=/wd4756
+build.bat
+```
+
+Nothing is linked: Flow's loader opens `nvflow.dll` and `nvflowext.dll`
+(`libnvflow.so` and `libnvflowext.so` on Linux) at run time, and `SCsub`
+copies both next to the built binary. Without them the Flow
+nodes show a configuration warning and stay inert.
 
 ## Selecting the backend
 
@@ -257,6 +297,93 @@ setup. `surface_anisotropy` optionally feeds PhysX per-particle anisotropy to th
 extractor for sharper crests — off by default; leave it off while emitting, where
 fast particles along the stream can mesh as spikes.
 
+## Granular — `PhysXGranular3D`
+
+A `PhysXParticleFluid3D` subclass whose particles behave as grains — sand, gravel,
+snow — rather than a liquid: they pile up, hold a slope up to `friction` (the
+angle of repose, in degrees), and get plowed and cratered by bodies moving
+through them. `density`, `hardness` and `grain_cohesion` tune the material;
+emission, colliders, the domain and the sphere `MultiMesh` render are all
+inherited. There is no isosurface.
+
+Only the MPM compute solver holds a real angle of repose (PhysX PBD particle
+friction cannot pile), so `solver = Auto` always resolves to MPM here — which
+also means it runs on any GPU, no CUDA needed. Pick `PBD (CUDA)` explicitly only
+for a pour or cascade that never has to hold a shape. Granular uses the dense
+box grid, so unlike the fluid it *is* confined to `mpm_domain_size`.
+
+## Smoke, fire and dust — `PhysXFlow3D` (NVIDIA Flow)
+
+`PhysXFlow3D` runs NVIDIA Flow: a sparse, unbounded grid that grows wherever
+the gas goes, with pressure projection, vorticity confinement and combustion
+(fuel, temperature, burn). It runs on Godot's own `RenderingDevice` (Vulkan or
+Direct3D 12), not CUDA, so it works on any GPU the Forward+ or Mobile renderer
+does. Nothing goes through the CPU unless `cpu_readback` is on (for
+`sample_smoke()`).
+
+Gas comes from `PhysXFlowEmitter3D` nodes: a sphere or box with `velocity`,
+`temperature`, `fuel`, `burn`, `smoke`, `divergence` and `couple_rate`. An
+emitter feeds the flow its `flow` path names, or with it empty, the scene's
+only flow — so emitters can live inside other scenes (a vehicle's wheels, a
+weapon's nozzle). With `collision` on, an emitter is a solid instead. Physics
+bodies within `collision_range` of the emitters are solids already (box,
+sphere, capsule and cylinder shapes), and moving bodies push the gas.
+
+`PhysXFlowRenderEffect` draws every flow with Flow's own ray marcher after
+transparent geometry, self-shadowed by the scene's first `DirectionalLight3D`,
+back to front. It installs itself: with no `Compositor` in the world it puts
+one on the `World3D`, and a user's own `Compositor` gets the effect at the
+rendering-server level only — its effects array is never modified — and all
+of it is undone when the last flow leaves. The look is per flow:
+`smoke_density`, `smoke_color` / `smoke_ramp`, `heat_ramp`,
+`temperature_range`, `emission_strength`, `shadow_steps`.
+
+Things worth knowing:
+- `max_blocks` is a GPU memory budget: Flow reserves textures for all of it
+  when the grid starts (about 0.45 MB a block; the default 1024 is about
+  0.5 GB). A small plume uses a few hundred; `get_stats()` reports
+  `active_blocks`, and gas that needs more is cut off with a warning.
+- Nozzle-like emitters need a high `couple_rate` (~100-250): the default 2
+  only nudges the gas toward the emitter's velocity.
+- Burning fuel adds a lot of heat, so a fuel jet rises fast at the default
+  `buoyancy`; lower it for flame throwers. Negative `divergence` keeps a jet
+  tight.
+- A grid can't resolve a crisp blowtorch or rocket cone (the flame front is
+  far thinner than a cell); pair Flow with a glowing mesh for the sharp core
+  — an opaque one, since Flow composites around depth.
+- Shaders compile the first time each is used and are kept in Godot's shader
+  cache folder; the editor's flows pause while the project runs from the
+  editor.
+
+## Smoke and gas — `PhysXGas3D`
+
+A library-free alternative to Flow, for builds without `flow_sdk=`.
+
+A volumetric smoke/gas solver: a persistent velocity + density field on a
+block-sparse grid, advected semi-Lagrangian, driven by `buoyancy` and vorticity
+confinement, and made divergence-free with a Jacobi pressure projection. It runs
+on plain compute shaders (no CUDA), independent of the PhysX GPU path. It is not
+a particle system.
+
+Injection points are `PhysXGasEmitter3D` nodes placed anywhere in the scene and
+listed in `emitters`; each has its own shape (sphere or axis-aligned box),
+`velocity` (rotated by the emitter's orientation), `density`, `divergence` and
+`swirl`. `turbulence_strength` / `turbulence_scale` add divergence-free curl-noise
+detail. Up to 4 `colliders` are voxelized as solids.
+
+It renders through a stock `FogVolume` + `FogMaterial` (the density grid is baked
+into an `ImageTexture3D` each step), so **`Environment.volumetric_fog_enabled`
+must be on** or nothing draws — the node shows a configuration warning when it
+isn't. `fire_look` swaps in an emissive hot-core-to-smoke colour ramp
+(`fire_color_ramp`, `fire_emission_strength`) over the same density field.
+`debug_point_cloud` is a fog-free fallback view.
+
+Scope: the domain's X/Z footprint and floor are fixed where the node was when it
+configured. Moving the node re-configures (and clears) the grid once it has been
+still for 0.2 s, so it can be repositioned while authoring, but it is not meant
+to follow a continuously moving object. The top of the box grows as a plume
+rises, up to 3× `domain_size.y`.
+
 ## Cloth — `PhysXCloth3D`
 
 A cloth patch: a generated grid or a supplied triangle mesh, simulated and drawn
@@ -280,6 +407,39 @@ Wind comes from an assigned `wind_area` (`Area3D`) plus a constant `wind` vector
 with `drag` / `lift` / `wind_turbulence` shaping the response. The node has a
 viewport gizmo: the rest-grid outline with size handles, a marker on each pinned
 vertex and a wind arrow.
+
+## Character cloth — `PhysXSkinnedCloth3D`
+
+Clothing on a character: a robe, cape or skirt that moves with the animation
+and swings and drapes on its own. Point `mesh_instance_path` at the skinned
+`MeshInstance3D` (it needs a `Skin` and a `Skeleton3D`) and pick its `surface`;
+that surface becomes the cloth, and the source mesh is hidden and drawn from
+the simulated positions instead, straight from GPU textures.
+
+Each vertex has a **max distance** it may stray from where the animation puts
+it: `0` follows the animation exactly (shoulders, a waistband), larger values
+swing freely (a hem, the tail of a cape). Paint them in the viewport — select
+the node and press **Paint Cloth**: the garment shows as a heat map, left drag
+paints toward the brush value, `Shift` toward `0`, `Ctrl` smooths, with
+**Fill** and **Ramp** buttons and undo per stroke. Or take them from the mesh's
+vertex colors (`use_vertex_color`, painted in a modeling tool), or let
+`pin_height` / `max_distance` ramp them automatically from the waist down.
+
+It collides with the character's physical bones: run **Skeleton3D > Create
+Physical Skeleton** and every enabled capsule or sphere shape on the
+`PhysicalBone3D`s is a collider (the bones don't need to simulate). Without a
+physical skeleton, capsules are placed automatically between the hips, spine,
+legs and arms, fitted to `body_mesh_path` if set. Collisions are swept across
+substeps so fast limbs don't jump through, and they win over the max
+distances; `backstop` keeps the cloth from sinking into the body, and free
+vertices are tethered to their nearest pinned one so long garments don't
+stretch. `animation_drive` pulls the cloth back toward its authored shape
+(useful for long robes), and `self_collision` is available, off by default.
+
+It runs on compute shaders (no CUDA, any GPU the renderer supports), only in a
+running game, and after the animation each frame (`process_priority` 100).
+Only the source material's albedo texture, albedo colour and roughness carry
+over for now.
 
 ## Soft bodies — stock `SoftBody3D`
 
@@ -367,6 +527,149 @@ static/dynamic baking per piece (defaults to Static, matching a plain
 fracture can spawn many pieces at once and a VoxelGI's dynamic-object
 tracking cost scales with how many it has to follow).
 
+## Vehicles — `PhysXVehicle3D`, `PhysXMotorcycle3D`, `PhysXTank3D`
+
+Vehicle nodes backed by PhysX's `PxVehicle2`. The stock `VehicleBody3D` /
+`VehicleWheel3D` already work on this backend and remain the right choice for a
+project that may switch engines; these nodes exist for what that model can't
+offer: an engine torque response, Ackermann steering, a slip-based tire friction
+curve (grip peaks at small slip and falls off when sliding), and per-wheel drive.
+
+The node layout mirrors `VehicleBody3D`: a `CollisionShape3D` child with a
+`BoxShape3D` for the chassis, plus `PhysXVehicleWheel3D` children. A wheel's own
+`position` is where it rests under static load, so a mesh parented under it
+follows the live suspension, steering and roll with no syncing code, and already
+sits at the right height in the editor. Wheels carry the suspension
+(`suspension_stiffness` / `_damping` / `_travel`) and tire
+(`tire_rest_grip`, `tire_slide_grip`, stiffnesses) parameters.
+
+- **`PhysXVehicle3D`** — 4 wheels, exactly 2 with `use_as_steering` (the front
+  axle). Drive with `throttle` / `brake` (0..1), `steer` (−1..1) and `reverse`.
+  Front/rear anti-roll bars, `ackermann_strength`, custom `center_of_mass`.
+- **`PhysXMotorcycle3D`** — 2 wheels, front steering, rear traction. `PxVehicle2`
+  has no balance mechanism, so staying upright is the script's job: read
+  `get_roll_angle()` / `get_angular_velocity()` each tick and correct with
+  `apply_torque_impulse()`, like a rider would.
+- **`PhysXTank3D`** — 2–16 wheels, skid-steer. Each wheel is assigned to the left
+  or right track from the sign of its local X. Drive with signed `left_ratio` /
+  `right_ratio` (−1..1): the sign is the direction, so opposite signs pivot in
+  place without a gear change.
+
+All three sleep when parked (`can_sleep`) and only simulate in a running game,
+never in the editor.
+
+## Water — `PhysXWaterSurface3D`
+
+An animated water surface with two GPU compute layers summed into one displaced
+mesh (created automatically as a child): a Tessendorf FFT ocean with a
+fetch-limited JONSWAP wind spectrum (`wind_speed`, `wind_direction`, `fetch`,
+over `ocean_domain_size`; heights in meters at `wave_amplitude` 1) and a local
+ripple layer — a damped shallow-water wave equation over `domain_size` whose
+wave speed follows `depth` — that bodies disturb.
+
+The water is a square by default. Set `surface_mesh` to any flat mesh (a disc
+baked from `CSGCylinder3D`, a kidney bean, a lake with an island) and its X/Z
+footprint becomes the water: the ripple grid fits itself to the outline, waves
+reflect off the shoreline, and the rendered surface is the footprint resampled
+into an even grid, so a coarse or fan-triangulated mesh still animates
+everywhere. With `fetch` left at 0 the footprint also sets the fetch, so an
+enclosed pool only gets small, short wind ripples while an open square is a
+developed sea. The simulation is centered on the node's position; keep the node
+unrotated and unscaled.
+
+`choppiness` adds the ocean waves' horizontal displacement, so crests come
+to a point and troughs flatten. Where it squeezes the surface past
+`foam_threshold` whitecap foam forms; it's kept with the water, not the wave,
+and fades over `foam_persistence` seconds, so crests leave streaks that break
+into lace. A strong wind gets whitecaps and a light one doesn't. `normal_mode` picks how normals and foam are shaded: Per Pixel
+(default) uses exact slopes from the FFT, so crests stay smooth at any mesh
+density; Per Vertex follows the mesh, for a softer or faceted, stylized look.
+
+Set `seabed_from_floor` for water over uneven ground, like a beach or a lake
+bed: each ripple cell's depth is measured once from the floor (static bodies in
+`seabed_collision_mask`). Waves then travel at the local shallow-water speed,
+slowing over shallows, the shoreline falls wherever the ground rises above the
+water, and the ocean chop fades out over the last `shallow_fade_depth` meters.
+Without it, the constant `depth` applies everywhere. On a beach, each arriving
+crest also leaves a thin foam sheet at the waterline (`shore_foam_band`) that
+surges in with the wave and slides back out with the backwash and undertow
+(`shore_undertow`), the shallows turn milky, and the surface feathers out onto
+the sand along a waterline that scallops with the arriving waves rather than
+following the depth contour. That edge is measured in meters of water
+(`swash_reach`, `shore_edge_softness` in the material), so it behaves the same
+whatever `shallow_fade_depth` is. The bigger waves also run up past the
+still-water line as a thin film on the sand (`swash_run_up`,
+`swash_drain_speed`), and the sand they cover stays dark and glossy while it
+dries (`wet_sand_dry_time`). The material's `shore_detail_scale` sets how fine
+the swash edge, the rim lace and the wet-sand line are. The shore patterns
+mirror-repeat past the simulated square, so the beach keeps its variation all
+along the shore.
+
+For open water, `render_extent` renders the surface out to the horizon: the FFT
+ocean tiles seamlessly past the simulated square and ripples settle to still
+water there. The surface draws only the side facing the camera (the top from
+above, the underside from below), and its shaders take their clock from the
+node's `water_time` parameter rather than `TIME`, so an open scene doesn't
+keep the editor redrawing (and competing with Play Scene for the GPU).
+
+`sample_height(position)` returns the same combined surface height on the CPU,
+for buoyancy scripts. Over dry cells (outside a `surface_mesh` footprint, or
+where the seabed is above the water) it returns `-INF` and `is_wet()` is false,
+so floaters on dry land don't float. Call `submit_sphere()` once per physics tick per floating
+body so it actually pushes the water (`ripple_amplitude` scales the wake), or
+`submit_impulse()` for one-off splashes.
+
+`caustics_enabled` renders a light-space caustic map with a direct
+`RenderingDevice` draw pass along `caustics_sun_direction`. Any material — the
+floor, walls, submerged props — can sample it by projecting its world position
+with `get_caustics_texture()`, `get_caustics_origin()`,
+`get_caustics_light_right()` / `_up()` and `get_caustics_half_extent()`, so the
+light pattern lands on anything under the water rather than only a flat floor.
+The map's green channel marks where sunlight actually came through the water
+(multiply by it, or a pool wall's outside picks up caustics), and the pattern
+repeats every `ocean_domain_size` (`get_caustics_tile_size()`), so a receiver
+can fold its position into one tile and light a whole seabed.
+
+Runs on any GPU with compute support, no CUDA needed. Without compute (e.g.
+headless) the surface stays flat and `sample_height()` returns `water_level`.
+
+## Boats — `PhysXBuoyancy3D`, `PhysXBoat3D`, `PhysXWaterWake3D`, `PhysXWaterSpray3D`
+
+Four nodes, each a child of a `RigidBody3D`, that float and drive it on a
+`PhysXWaterSurface3D`. Buoyancy and the boat only apply `RigidBody3D` forces,
+so they work with whichever physics engine is selected, Jolt included.
+
+- **`PhysXBuoyancy3D`** floats the body: sample points on the hull (six from
+  its collision shapes' bounds by default) each carry a share of `hull_area`
+  and are pushed up by the water they displace, so the body settles at its
+  real draft, pitches and rolls with the waves and rights itself. It reads the
+  water with `sample_height()`, refreshed every physics tick, waves and other
+  bodies' wakes included.
+- **`PhysXBoat3D`** drives it: thrust from a propeller at `propeller_position`
+  (only while it's in the water) that `steering` turns like an outboard, the
+  water across the propeller's leg (it steers with flow and holds the stern on
+  course), and hull drag in the boat's frame — low along the keel, high
+  sideways and vertically, at the bow and stern so the hull's length resists
+  turning and pitching. `hull_drag.z` with `max_thrust` sets the top speed.
+- **`PhysXWaterWake3D`** leaves a wake: a small GPU ripple grid that slides
+  with the boat (fixed to the water, so the wake stays where it was made) and
+  that the hull pushes down, plus foam — two bands peeling off the hull's
+  sides and a propeller band down the middle, fading over `foam_persistence`.
+  The water material draws it and `sample_height()` includes it, so other
+  floaters ride it. A grid big enough to hold a turning circle (`size`, with
+  `cells` for about 0.25 m cells) and a `foam_persistence` of about a lap let
+  the wake close into a ring.
+- **`PhysXWaterSpray3D`** drives ordinary `GPUParticles3D` nodes authored in
+  the editor: bow emitters with speed, stern emitters with thrust, one-shot
+  slam emitters when the hull drops back onto the water. Emitters are held at
+  the water under their place on the hull. The spray leaves foam where it
+  lands (worked out from the emitters' launch geometry, no particle collision
+  needed); `water_collision` adds a collider on the water for spray that
+  should land and skid. Save the emitters with `emitting` off — the node
+  starts them — or the editor redraws every frame for them.
+
+The demo boat is `demo/common/boat/boat.tscn`, on the beach.
+
 ## Determinism and multiplayer
 
 - **GPU dynamics is never deterministic** — GPU solver scheduling varies run to
@@ -385,11 +688,16 @@ For deterministic lockstep multiplayer, use the Jolt backend.
   `Generic6DOFJoint3D` linear/angular spring on each link to pull it back toward
   its rest pose (PhysX 5 removed joint projection, so a spring is the closest
   substitute).
-- **Not yet implemented:** separation-ray shapes; center-of-mass and inertia
-  tensor overrides; 6DOF angular motors; joint softness / bias / restitution
-  parameters. 6DOF linear and angular springs are supported (mapped onto PhysX
-  joint drives). Unsupported shapes are treated as having no collision and log
-  a warning once.
+- **Not yet implemented:** 6DOF angular motors; joint softness / bias /
+  restitution parameters. (6DOF linear and angular springs are supported,
+  mapped onto PhysX joint drives.) Unsupported shapes are treated as having
+  no collision and log a warning once.
+- **`SeparationRayShape3D`** has no PhysX geometry: it's cast as a ray. In
+  `move_and_slide` it lifts a character until its tip sits on what it hits
+  (stairs), as on Godot Physics and Jolt. On a rigid body it's applied before
+  each step as a frictional contact at the tip, not inside the PhysX solver,
+  so a body on rays settles a little differently from Jolt (it loses more
+  energy crossing bumps).
 - **Area-to-area detection** (`Area3D` monitoring another `Area3D`) works, but
   unlike every other collision pair in this module it costs real per-step
   work: PhysX never reports trigger-trigger pairs (only trigger-vs-rigid), so
@@ -426,14 +734,38 @@ For deterministic lockstep multiplayer, use the Jolt backend.
   on any backend.
 - **Cylinder shapes** are approximated by a 16-sided convex prism.
 - **Concave (trimesh) shapes** are supported on static and kinematic bodies
-  only, as in most engines.
-- **Cloth self-collision** is disabled; a cloth can pass through itself. Cloth
-  tearing is not implemented.
-- Windows x86-64 is the only platform actually built and tested. Linux has been
-  prepped (`SCsub`, `misc/physx_presets/linux64-godot*.xml`,
-  `build_physx.py --platform linuxbsd`) but not run against a real toolchain —
-  see the Linux checklist under [Building](#building) for the specific
-  unknowns to resolve first if it doesn't work out of the box.
+  only, as in most engines. They collide on their front faces only unless
+  `backface_collision` is on, as on Jolt; with it on, the mesh is cooked with a
+  flipped copy of every triangle (PhysX has no two-sided contact option), so
+  it takes twice the memory and triangle tests. One difference from Jolt:
+  overlap queries (`intersect_shape`, `collide_shape`, `get_rest_info`) see a
+  one-sided mesh from behind too.
+- **`PhysXCloth3D` self-collision** is disabled; that cloth can pass through
+  itself (`PhysXSkinnedCloth3D` has opt-in `self_collision`). Cloth tearing is
+  not implemented. `PhysXCloth3D` pins follow a single shared
+  `anchor_path`; for cloth driven by a skeleton (a cape or robe on a
+  character), use `PhysXSkinnedCloth3D`, or stock `SoftBody3D` with
+  per-vertex pins.
+- **Exports don't copy the module's DLLs yet.** `SCsub` puts them next to the
+  editor binary only, so an exported game needs them copied by hand:
+  `NvBlast*.dll` / `libNvBlast*.so` (`blast_sdk=`; linked at startup, so the
+  game won't start without them), `PhysXGpu_64.dll` / `libPhysXGpu_64.so`
+  (`physx_gpu=yes`; without it PhysX silently falls back to the CPU), and
+  `nvflow.dll` / `nvflowext.dll` / `libnvflow*.so` (`flow_sdk=`; without them
+  the Flow nodes stay inert). The export template must be built with
+  the same options.
+- **NVIDIA Flow** (`PhysXFlow3D`):
+  - only box, sphere, capsule and cylinder shapes are solids for the gas;
+    convex, concave and height-field shapes aren't yet;
+  - it needs the Forward+ or Mobile renderer (not Compatibility, not
+    headless);
+  - each flow is its own grid, drawn back to front by distance: flows that
+    share the same space can still sort wrongly;
+  - it draws after transparent geometry, so an additive mesh inside the gas
+    is painted over — use an opaque glowing mesh for a flame core;
+  - NanoVDB (volume) emitters aren't supported;
+  - Flow doesn't build on macOS.
+- Windows and Linux x86-64 are the only platforms built and tested.
 
 ## Layout
 
@@ -442,19 +774,23 @@ For deterministic lockstep multiplayer, use the Jolt backend.
 | `godot_physx_server_3d.*` | `PhysicsServer3D` implementation; owns the PhysX foundation, physics, CPU dispatcher and CUDA context |
 | `godot_physx_project_settings.*` | registers and reads the `physics/physx_3d/*` settings |
 | `godot_physx_conversions.h` | `Vector3` / `Quaternion` / `Transform3D` ↔ PhysX conversions |
-| `objects/` | rigid bodies, areas, the GPU fluid and the GPU cloth surface |
+| `objects/` | rigid bodies, areas, the GPU fluid, the GPU cloth surface and GPU soft bodies |
 | `shapes/` | collision shape wrappers and mesh cooking |
 | `spaces/` | the `PxScene` wrapper, direct space/body state, area-override application |
 | `joints/` | all `Joint3D` types |
-| `cloth/` | the CPU (XPBD) cloth solver — no PhysX dependency |
-| `nodes/` | `PhysXParticleFluid3D`, `PhysXCloth3D`, `PhysXChunkEmitter3D` |
+| `cloth/` | the CPU (XPBD) cloth solver, and `PhysXSkinnedCloth3D` with its compute-shader solver — no PhysX dependency |
+| `nodes/` | `PhysXParticleFluid3D`, `PhysXGranular3D`, `PhysXGas3D`, `PhysXGasEmitter3D`, `PhysXCloth3D`, `PhysXChunkEmitter3D` |
+| `particles/` | the MPM fluid/granular and gas compute solvers and their GLSL shaders |
+| `vehicle/` | `PhysXVehicle3D`, `PhysXMotorcycle3D`, `PhysXTank3D`, `PhysXVehicleWheel3D` and the `PxVehicle2` glue |
+| `water/` | `PhysXWaterSurface3D` and its ripple / FFT ocean / caustics compute and draw passes; `PhysXBuoyancy3D`, `PhysXBoat3D`, `PhysXWaterWake3D` (and its wake compute pass) and `PhysXWaterSpray3D` |
+| `flow/` | `PhysXFlow3D`, `PhysXFlowEmitter3D`, `PhysXFlowRenderEffect`, and Flow's context on Godot's `RenderingDevice` — optional, gated on `flow_sdk=` (see Building above) |
 | `blast/` | `PhysXDestructible3D`, `PhysXBlastAsset`, and the NvBlast fracture-authoring bridge — optional, gated on `blast_sdk=` (see Building above) |
 | `editor/` | viewport gizmos for the fluid and cloth nodes; the Blast fracture dialog and its FileSystem/Inspector plugins |
 
 ## License
 
-The module's own source is under the same MIT license as Godot Engine (see the
-header of each file).
+The module's own source is under the MIT License — see [`LICENSE`](LICENSE).
+Copyright (c) 2026 Wild Ox Studios.
 
 It links **NVIDIA PhysX 5** (<https://github.com/NVIDIA-Omniverse/PhysX>),
 which is distributed under the BSD-3-Clause license — a full copy is in
@@ -465,15 +801,21 @@ any binary you distribute must carry the PhysX copyright notice and disclaimer
 (e.g. by shipping `PHYSX-LICENSE.md` alongside it or adding a stanza to the
 engine's `COPYRIGHT.txt`).
 
-With `physx_gpu=yes` the build also depends on `PhysXGpu_64.dll` (same PhysX
-SDK, same BSD-3-Clause license, built from its GPU source) and, at runtime, on
-an NVIDIA driver's CUDA library (`nvcuda.dll`) — the CUDA toolkit is only
-needed to *build* the SDK, not to ship it.
+With `physx_gpu=yes` the build also depends on `PhysXGpu_64.dll` /
+`libPhysXGpu_64.so` (same PhysX SDK, same BSD-3-Clause license, built from its
+GPU source) and, at runtime, on an NVIDIA driver's CUDA library (`nvcuda.dll` /
+`libcuda.so.1`) — the CUDA toolkit is only needed to *build* the SDK, not to
+ship it.
 
 With `blast_sdk=` set, the build also links **NvBlast**
 (<https://github.com/NVIDIA-Omniverse/PhysX/tree/main/blast>) — the same
 `NVIDIA-Omniverse/PhysX` repository as PhysX itself, so the same
 BSD-3-Clause license in `PHYSX-LICENSE.md` covers it too. Unlike PhysX's
-static libraries, Blast ships as DLLs (`NvBlast`, `NvBlastGlobals`,
+static libraries, Blast ships as shared libraries (`NvBlast`, `NvBlastGlobals`,
 `NvBlastExtAuthoring`, `NvBlastExtShaders`) that must ship next to the Godot
 binary — see Building above.
+
+With `flow_sdk=` set, the build loads **NVIDIA Flow**
+(<https://github.com/NVIDIA-Omniverse/PhysX/tree/main/flow>) at run time —
+again the same repository and BSD-3-Clause license. `nvflow.dll` and
+`nvflowext.dll` (`.so` on Linux) must ship next to the Godot binary.

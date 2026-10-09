@@ -6,36 +6,34 @@ This script clones NVIDIA's PhysX repository at a pinned revision, drops in a
 build preset tuned to match Godot, runs PhysX's own project generation and
 CMake build, and prints the path to pass to scons as physx_sdk=.
 
-    python modules/godot_physx/misc/build_physx.py [--gpu] [--blast]
-    scons platform=windows target=editor physx_sdk=<printed path> [physx_gpu=yes] [blast_sdk=<printed path>]
+    python modules/godot_physx/misc/build_physx.py [--gpu] [--blast] [--flow]
+    scons platform=windows target=editor physx_sdk=<printed path> [physx_gpu=yes] [blast_sdk=<printed path>] [flow_sdk=<printed path>]
 
-The GPU build additionally needs the CUDA Toolkit installed (CUDA_PATH set).
-PhysXGpu_64.dll must sit next to the Godot binary at runtime -- on Windows,
-SCsub copies it there automatically as part of the scons build printed below
-(a real SCons dependency, not a one-time thing you have to remember); on
-Linux this is still unverified/manual, see README.md's Linux section.
+The GPU build also needs the CUDA Toolkit (CUDA_PATH set or nvcc on PATH).
+SCsub copies the GPU library next to the Godot binary for you.
 
 --blast additionally builds the Blast SDK (runtime mesh fracture/destruction,
 NvBlast + extensions, backing PhysXDestructible3D and its in-editor fracture
 dialog) from this same checkout's blast/ subdirectory -- it's version-locked
 to the same NVIDIA-Omniverse/PhysX release train as PhysX itself, so no
-separate clone or ref pin is needed. Unlike PhysX, Blast ships as DLLs, not
-static libs; on Windows, SCsub copies all four next to the Godot binary
-automatically too, same mechanism as PhysXGpu_64.dll -- on Linux this is
-also still unverified/manual.
+separate clone or ref pin is needed. SCsub copies its libraries next to the
+Godot binary too.
+
+--flow additionally builds NVIDIA Flow (sparse-grid smoke / fire / dust,
+backing PhysXFlow3D) from the same checkout's flow/ subdirectory, with its own
+build.bat / build.sh. flow_sdk= is that flow/ directory itself. Nothing is
+linked -- nvflow / nvflowext are loaded at run time, and SCsub copies both
+next to the Godot binary.
+
+The last thing printed is the scons command for everything built.
 
 Run this script on the machine you're building the module for -- --platform
-defaults to the host OS (windows / linuxbsd). The Linux presets
-(linux64-godot[-gpu].xml) are UNVERIFIED: nobody has run this script or built
-the module on Linux yet, only prepared it. If generate_projects.sh, the CMake
-build, or the later scons link step fails, see each preset file's header
-comment and README.md's Linux section for the specific unknowns to check
-first (preset platform/compiler naming, install bin/ layout, GPU link
-mechanism) before assuming something else is wrong.
+defaults to the host OS (windows / linuxbsd).
 """
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -63,6 +61,11 @@ def main():
         help="also build the Blast SDK (NvBlast + extensions) from this same checkout's blast/ subdirectory",
     )
     ap.add_argument(
+        "--flow",
+        action="store_true",
+        help="also build NVIDIA Flow (nvflow + nvflowext) from this same checkout's flow/ subdirectory",
+    )
+    ap.add_argument(
         "--platform",
         choices=["windows", "linuxbsd"],
         default="windows" if os.name == "nt" else "linuxbsd",
@@ -83,15 +86,6 @@ def main():
     preset_file = os.path.join(PRESET_DIR, preset + ".xml")
     if not os.path.isfile(preset_file):
         sys.exit("missing preset: " + preset_file)
-    if args.platform == "linuxbsd":
-        print(
-            "NOTE: the %s preset is unverified -- no Linux build of this module has "
-            "been run yet. See its header comment and README.md's Linux section for "
-            "the specific unknowns (preset platform/compiler naming, install bin/ "
-            "layout, GPU link mechanism) if generate_projects.sh or the CMake build "
-            "fails here." % preset
-        )
-
     if args.gpu and not (os.environ.get("CUDA_PATH") or shutil.which("nvcc")):
         sys.exit("--gpu needs the CUDA Toolkit (set CUDA_PATH or put nvcc on PATH)")
 
@@ -137,7 +131,9 @@ def main():
     gen_path = os.path.join(physx, gen)
     run([gen_path, preset] if is_windows else ["bash", gen_path, preset], cwd=physx)
 
-    build_dir = os.path.join(physx, "compiler", preset)
+    # Visual Studio is a multi-config generator (one build dir, config picked at
+    # build time); on Linux PhysX generates one Makefile build dir per config.
+    build_dir = os.path.join(physx, "compiler", preset if is_windows else preset + "-" + args.config)
     if not os.path.isdir(build_dir):
         sys.exit("project generation did not produce " + build_dir)
     run(
@@ -149,30 +145,20 @@ def main():
     if not os.path.isdir(os.path.join(sdk, "include")):
         sys.exit("build finished but no SDK at " + sdk)
 
+    # Extra scons options from each optional SDK, printed as one command at the end.
+    scons_args = ["physx_sdk=" + sdk.replace("\\", "/")]
+    if args.gpu:
+        scons_args.append("physx_gpu=yes")
+
     print()
     print("PhysX SDK ready:")
     print("    " + sdk)
-    print()
-    print("Build the module with:")
-    print(
-        "    scons platform=%s target=editor physx_sdk=%s%s"
-        % (args.platform, sdk.replace("\\", "/"), " physx_gpu=yes" if args.gpu else "")
-    )
     if args.gpu:
-        if args.platform == "windows":
-            print()
-            print("SCsub copies PhysXGpu_64.dll next to the Godot binary automatically -- nothing more to do.")
-        else:
-            # UNVERIFIED bin/ subdirectory name -- see linux64-godot-gpu.xml's
-            # header comment; check the actual install output and adjust.
-            # Also UNVERIFIED whether Linux even needs a copied .so the way
-            # Windows needs the DLL (vs. an rpath/LD_LIBRARY_PATH entry, or a
-            # pure dlopen with no on-disk convention to match) -- SCsub does
-            # not auto-copy anything here yet.
-            so = os.path.join(sdk, "bin", "linux.clang.x86_64", args.config, "libPhysXGpu_64.so")
-            print()
-            print("Then copy the GPU runtime next to the Godot binary (path above is a guess -- verify it):")
-            print("    cp %s bin/" % so)
+        print()
+        print(
+            "SCsub copies %s next to the Godot binary, nothing else to do."
+            % ("PhysXGpu_64.dll" if args.platform == "windows" else "libPhysXGpu_64.so")
+        )
 
     if args.blast:
         # Blast lives in the SAME checkout as PhysX (NVIDIA-Omniverse/PhysX's
@@ -188,40 +174,66 @@ def main():
         blast_script = os.path.join(blast_dir, "build.bat" if is_windows else "build.sh")
         if not os.path.isfile(blast_script):
             sys.exit("no Blast build script at " + blast_script)
-        run([blast_script] if is_windows else ["bash", blast_script], cwd=blast_dir)
+        if is_windows:
+            run([blast_script], cwd=blast_dir)
+        else:
+            # Use our own compiler instead of NVIDIA's build container (patch 0005).
+            blast_cmd = ["bash", blast_script, "--no-docker"]
+            # Parallel codegen sometimes leaves a half written header, a rerun fixes it.
+            if subprocess.call(blast_cmd, cwd=blast_dir) != 0:
+                print("Blast build failed, retrying once")
+                run(blast_cmd, cwd=blast_dir)
 
         blast_platform = "windows-x86_64" if is_windows else "linux-x86_64"
         blast_sdk = os.path.join(blast_dir, "_build", blast_platform, "release", "blast-sdk")
         if not os.path.isdir(os.path.join(blast_sdk, "include")):
             sys.exit("Blast build finished but no SDK at " + blast_sdk)
 
+        scons_args.append("blast_sdk=" + blast_sdk.replace("\\", "/"))
+
         print()
         print("Blast SDK ready:")
         print("    " + blast_sdk)
-        print()
-        print("Build the module with blast_sdk= added:")
-        print(
-            "    scons platform=%s target=editor physx_sdk=%s blast_sdk=%s%s"
-            % (
-                args.platform,
-                sdk.replace("\\", "/"),
-                blast_sdk.replace("\\", "/"),
-                " physx_gpu=yes" if args.gpu else "",
-            )
-        )
-        print()
+        print("SCsub copies Blast's libraries next to the Godot binary.")
+
+    if args.flow:
+        # Flow lives in the same checkout too (its flow/ subdirectory), with its
+        # own premake5-based build. Its scripts must run from the flow/
+        # directory. MSVC 14.44 turns warning C4756 (overflow in constant
+        # arithmetic, in Flow's float-limit constants) into an error under
+        # Flow's warnings-as-errors; CL=/wd4756 silences just that one.
+        flow_dir = os.path.join(src, "flow")
+        if not os.path.isdir(flow_dir):
+            sys.exit("--flow needs a flow/ directory in the checkout at " + src)
         if is_windows:
-            print("Blast ships as DLLs (not static libs, unlike PhysX) -- SCsub copies all four next to")
-            print("the Godot binary automatically (NvBlast, NvBlastGlobals, NvBlastExtAuthoring,")
-            print("NvBlastExtShaders) -- nothing more to do.")
+            flow_script = os.path.join(flow_dir, "build.bat")
         else:
-            # UNVERIFIED, same as the GPU .so case above -- SCsub does not
-            # auto-copy anything on Linux yet.
-            print("Blast ships as DLLs (not static libs, unlike PhysX) -- copy these next to the Godot binary too:")
-            blast_bin = os.path.join(blast_sdk, "bin")
-            for name in ("NvBlast", "NvBlastGlobals", "NvBlastExtAuthoring", "NvBlastExtShaders"):
-                runtime = os.path.join(blast_bin, name + ".so")
-                print("    cp %s bin/" % runtime)
+            # ARM Linux has its own script.
+            flow_script = os.path.join(flow_dir, "build_aarch64.sh" if platform.machine() == "aarch64" else "build.sh")
+        if not os.path.isfile(flow_script):
+            sys.exit("no Flow build script at " + flow_script)
+        flow_env = os.environ.copy()
+        if is_windows:
+            flow_env["CL"] = (flow_env.get("CL", "") + " /wd4756").strip()
+        print("+ %s  (in %s)" % (flow_script, flow_dir))
+        subprocess.check_call([flow_script] if is_windows else ["bash", flow_script], cwd=flow_dir, env=flow_env)
+
+        flow_platform = "windows-x86_64" if is_windows else "linux-" + platform.machine()
+        flow_bin = os.path.join(flow_dir, "_build", flow_platform, "release")
+        flow_libs = ("nvflow.dll", "nvflowext.dll") if is_windows else ("libnvflow.so", "libnvflowext.so")
+        missing = [name for name in flow_libs if not os.path.isfile(os.path.join(flow_bin, name))]
+        if missing:
+            sys.exit("Flow build finished but %s missing from %s" % (", ".join(missing), flow_bin))
+        scons_args.append("flow_sdk=" + flow_dir.replace("\\", "/"))
+
+        print()
+        print("Flow ready:")
+        print("    " + flow_dir)
+        print("SCsub copies %s and %s next to the Godot binary automatically." % flow_libs)
+
+    print()
+    print("Build the module with:")
+    print("    scons platform=%s target=editor %s" % (args.platform, " ".join(scons_args)))
 
 
 if __name__ == "__main__":

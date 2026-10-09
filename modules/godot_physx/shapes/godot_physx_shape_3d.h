@@ -30,12 +30,12 @@
 
 #pragma once
 
+#include "core/math/vector3.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/rid.h"
 #include "core/templates/rid_owner.h"
 #include "core/variant/variant.h"
 #include "servers/physics_3d/physics_server_3d.h"
-
-#include "core/math/vector3.h"
 
 #include <foundation/PxTransform.h>
 #include <geometry/PxBoxGeometry.h>
@@ -48,6 +48,8 @@
 #include <geometry/PxTriangleMeshGeometry.h>
 
 class GodotPhysXShape3D;
+class GodotPhysXBody3D;
+class GodotPhysXArea3D;
 
 // Local pose offset that a shape wants applied when attached to an actor
 // (PhysX capsules/planes are X-axis aligned; Godot expects Y / plane-at-origin).
@@ -82,6 +84,19 @@ class GodotPhysXShape3D {
 	physx::PxHeightField *height_field = nullptr;
 	void _release_meshes();
 
+	// Trimesh: ConcavePolygonShape3D.backface_collision. PhysX contacts only
+	// ever meet a mesh triangle from its front, so a mesh with back faces on
+	// is cooked with every triangle twice -- the second copy flipped -- and
+	// source_triangle_count tells the copies apart.
+	bool backface_collision = false;
+	int source_triangle_count = 0;
+
+	// SeparationRayShape3D: no PhysX geometry (is_valid() stays false, so
+	// actors and scene queries never see it). The motion test and the space's
+	// pre-step pass cast it as a ray along +Z instead.
+	real_t ray_length = 1.0;
+	bool ray_slide_on_slope = false;
+
 public:
 	~GodotPhysXShape3D();
 
@@ -99,6 +114,14 @@ public:
 
 	bool is_valid() const { return geom_valid; }
 	bool is_trimesh() const { return type == PhysicsServer3D::SHAPE_CONCAVE_POLYGON; }
+	bool has_backface_collision() const { return backface_collision; }
+	bool is_separation_ray() const { return type == PhysicsServer3D::SHAPE_SEPARATION_RAY; }
+	real_t get_ray_length() const { return ray_length; }
+	bool is_ray_sliding_on_slope() const { return ray_slide_on_slope; }
+	// Trimesh: Godot's face index for a triangle index PhysX reports (cooking
+	// reorders triangles). r_back is set when the hit was the flipped copy,
+	// i.e. the back of the source face. -1 if unknown.
+	int source_face_index(uint32_t p_cooked_index, bool &r_back) const;
 	// Trimesh and height field: PhysX only allows these on static/kinematic actors.
 	bool is_static_only() const { return type == PhysicsServer3D::SHAPE_CONCAVE_POLYGON || type == PhysicsServer3D::SHAPE_HEIGHTMAP; }
 	const GodotPhysXShapeGeometry &get_geometry() const { return geom; }
@@ -114,4 +137,17 @@ public:
 		physx::PxTransform local_pose{ physx::PxIdentity };
 	};
 	ScaledGeometry scaled_geometry(const Vector3 &p_scale) const;
+
+	// The bodies / areas using this shape (refcounted: one may use it at several indices), so a data change or a
+	// free reaches just them instead of every body on the server.
+	void add_owner(GodotPhysXBody3D *p_body) { body_owners[p_body]++; }
+	void remove_owner(GodotPhysXBody3D *p_body);
+	void add_owner(GodotPhysXArea3D *p_area) { area_owners[p_area]++; }
+	void remove_owner(GodotPhysXArea3D *p_area);
+	const HashMap<GodotPhysXBody3D *, int> &get_body_owners() const { return body_owners; }
+	const HashMap<GodotPhysXArea3D *, int> &get_area_owners() const { return area_owners; }
+
+private:
+	HashMap<GodotPhysXBody3D *, int> body_owners;
+	HashMap<GodotPhysXArea3D *, int> area_owners;
 };

@@ -38,6 +38,12 @@
 #include "blast/physx_blast_authoring.h"
 #include "blast/physx_destructible_3d.h"
 #endif
+#include "cloth/physx_skinned_cloth_3d.h"
+#ifdef GODOT_PHYSX_FLOW
+#include "flow/physx_flow_3d.h"
+#include "flow/physx_flow_emitter_3d.h"
+#include "flow/physx_flow_render_effect.h"
+#endif
 #include "nodes/physx_chunk_emitter_3d.h"
 #include "nodes/physx_cloth_3d.h"
 #include "nodes/physx_gas_3d.h"
@@ -51,6 +57,12 @@
 #include "vehicle/physx_tank_3d.h"
 #include "vehicle/physx_vehicle_3d.h"
 #include "vehicle/physx_vehicle_wheel_3d.h"
+#include "water/physx_boat_3d.h"
+#include "water/physx_buoyancy_3d.h"
+#include "water/physx_water_spray_3d.h"
+#include "water/physx_water_surface_3d.h"
+#include "water/physx_water_wake_3d.h"
+#include "water/water_ripple_probe.h"
 
 #include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
@@ -58,6 +70,7 @@
 #include "servers/physics_3d/physics_server_3d_wrap_mt.h"
 
 #ifdef TOOLS_ENABLED
+#include "editor/physx_cloth_paint_plugin.h"
 #include "editor/physx_editor_plugin.h"
 #include "editor/plugins/editor_plugin.h"
 #endif
@@ -84,9 +97,17 @@ void initialize_godot_physx_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(PhysXParticleFluid3D);
 		GDREGISTER_CLASS(PhysXGranular3D);
 		GDREGISTER_CLASS(PhysXCloth3D);
+		GDREGISTER_CLASS(PhysXSkinnedCloth3D);
 		GDREGISTER_CLASS(PhysXChunkEmitter3D);
 		GDREGISTER_CLASS(PhysXGas3D);
 		GDREGISTER_CLASS(PhysXGasEmitter3D);
+		// Runtime-bridge MVP probe, not public API yet -- see water/water_ripple_probe.h.
+		GDREGISTER_CLASS(WaterRippleProbe);
+		GDREGISTER_CLASS(PhysXWaterSurface3D);
+		GDREGISTER_CLASS(PhysXBuoyancy3D);
+		GDREGISTER_CLASS(PhysXBoat3D);
+		GDREGISTER_CLASS(PhysXWaterWake3D);
+		GDREGISTER_CLASS(PhysXWaterSpray3D);
 		// Runtime-bridge MVP probe, not public API yet -- see vehicle/godot_physx_vehicle_probe.h.
 		GDREGISTER_CLASS(GodotPhysXVehicleProbe);
 		GDREGISTER_CLASS(PhysXVehicle3D);
@@ -104,14 +125,25 @@ void initialize_godot_physx_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(PhysXBlastAsset);
 		GDREGISTER_CLASS(PhysXBlastAuthoring);
 #endif
+#ifdef GODOT_PHYSX_FLOW
+		GDREGISTER_CLASS(PhysXFlow3D);
+		GDREGISTER_CLASS(PhysXFlowEmitter3D);
+		GDREGISTER_CLASS(PhysXFlowRenderEffect);
+#endif
 	}
 
 #ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
 		EditorPlugins::add_by_type<PhysXEditorPlugin>();
+		EditorPlugins::add_by_type<PhysXClothPaintPlugin>();
 	}
 #endif
 }
 
 void uninitialize_godot_physx_module(ModuleInitializationLevel p_level) {
+#ifdef GODOT_PHYSX_FLOW
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		PhysXFlowRenderEffect::free_shared();
+	}
+#endif
 }

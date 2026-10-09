@@ -139,13 +139,20 @@ void GodotPhysXServer3D::shape_set_data(RID p_shape, const Variant &p_data) {
 	ERR_FAIL_NULL(shape);
 	shape->set_data(p_data);
 
-	// Rebuild any body currently using this shape.
-	LocalVector<RID> body_rids = body_owner.get_owned_list();
-	for (const RID &body_rid : body_rids) {
-		GodotPhysXBody3D *body = body_owner.get_or_null(body_rid);
-		if (body) {
-			body->shape_changed(shape);
-		}
+	// Update the bodies + areas using this shape (in place: see GodotPhysXBody3D::_edit_shape_in_place).
+	LocalVector<GodotPhysXBody3D *> bodies;
+	for (const KeyValue<GodotPhysXBody3D *, int> &E : shape->get_body_owners()) {
+		bodies.push_back(E.key);
+	}
+	for (GodotPhysXBody3D *body : bodies) {
+		body->shape_changed(shape);
+	}
+	LocalVector<GodotPhysXArea3D *> areas;
+	for (const KeyValue<GodotPhysXArea3D *, int> &E : shape->get_area_owners()) {
+		areas.push_back(E.key);
+	}
+	for (GodotPhysXArea3D *area : areas) {
+		area->shape_changed(shape);
 	}
 }
 
@@ -351,6 +358,12 @@ void GodotPhysXServer3D::area_set_monitorable(RID p_area, bool p_monitorable) {
 	area->set_monitorable(p_monitorable);
 }
 
+void GodotPhysXServer3D::area_set_ray_pickable(RID p_area, bool p_enable) {
+	GodotPhysXArea3D *area = area_owner.get_or_null(p_area);
+	ERR_FAIL_NULL(area);
+	area->set_ray_pickable(p_enable);
+}
+
 void GodotPhysXServer3D::area_set_monitor_callback(RID p_area, const Callable &p_callback) {
 	GodotPhysXArea3D *area = area_owner.get_or_null(p_area);
 	ERR_FAIL_NULL(area);
@@ -372,6 +385,10 @@ void GodotPhysXServer3D::area_set_param(RID p_area, AreaParameter p_param, const
 			space->set_gravity_magnitude(p_value);
 		} else if (p_param == AREA_PARAM_GRAVITY_VECTOR) {
 			space->set_gravity_direction(p_value);
+		} else if (p_param == AREA_PARAM_LINEAR_DAMP) {
+			space->set_default_damping(p_value, space->get_default_angular_damp());
+		} else if (p_param == AREA_PARAM_ANGULAR_DAMP) {
+			space->set_default_damping(space->get_default_linear_damp(), p_value);
 		}
 		return;
 	}
@@ -387,6 +404,10 @@ Variant GodotPhysXServer3D::area_get_param(RID p_area, AreaParameter p_param) co
 			return space->get_gravity().length();
 		} else if (p_param == AREA_PARAM_GRAVITY_VECTOR) {
 			return space->get_gravity().normalized();
+		} else if (p_param == AREA_PARAM_LINEAR_DAMP) {
+			return space->get_default_linear_damp();
+		} else if (p_param == AREA_PARAM_ANGULAR_DAMP) {
+			return space->get_default_angular_damp();
 		}
 		return Variant();
 	}
@@ -546,6 +567,12 @@ bool GodotPhysXServer3D::body_is_continuous_collision_detection_enabled(RID p_bo
 	return body->is_ccd_enabled();
 }
 
+void GodotPhysXServer3D::body_set_ray_pickable(RID p_body, bool p_enable) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->set_ray_pickable(p_enable);
+}
+
 void GodotPhysXServer3D::body_set_param(RID p_body, BodyParameter p_param, const Variant &p_value) {
 	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
 	ERR_FAIL_NULL(body);
@@ -592,6 +619,72 @@ void GodotPhysXServer3D::body_apply_central_force(RID p_body, const Vector3 &p_f
 	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
 	ERR_FAIL_NULL(body);
 	body->apply_central_force(p_force);
+}
+
+void GodotPhysXServer3D::body_apply_force(RID p_body, const Vector3 &p_force, const Vector3 &p_position) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->apply_force(p_force, p_position);
+}
+
+void GodotPhysXServer3D::body_apply_torque(RID p_body, const Vector3 &p_torque) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->apply_torque(p_torque);
+}
+
+void GodotPhysXServer3D::body_add_constant_central_force(RID p_body, const Vector3 &p_force) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->add_constant_central_force(p_force);
+}
+
+void GodotPhysXServer3D::body_add_constant_force(RID p_body, const Vector3 &p_force, const Vector3 &p_position) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->add_constant_force(p_force, p_position);
+}
+
+void GodotPhysXServer3D::body_add_constant_torque(RID p_body, const Vector3 &p_torque) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->add_constant_torque(p_torque);
+}
+
+void GodotPhysXServer3D::body_set_constant_force(RID p_body, const Vector3 &p_force) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->set_constant_force(p_force);
+}
+
+Vector3 GodotPhysXServer3D::body_get_constant_force(RID p_body) const {
+	const GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, Vector3());
+	return body->get_constant_force();
+}
+
+void GodotPhysXServer3D::body_set_constant_torque(RID p_body, const Vector3 &p_torque) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->set_constant_torque(p_torque);
+}
+
+Vector3 GodotPhysXServer3D::body_get_constant_torque(RID p_body) const {
+	const GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, Vector3());
+	return body->get_constant_torque();
+}
+
+void GodotPhysXServer3D::body_set_axis_velocity(RID p_body, const Vector3 &p_axis_velocity) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->set_axis_velocity(p_axis_velocity);
+}
+
+void GodotPhysXServer3D::body_reset_mass_properties(RID p_body) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->reset_mass_properties();
 }
 
 void GodotPhysXServer3D::body_set_axis_lock(RID p_body, BodyAxis p_axis, bool p_lock) {
@@ -708,8 +801,13 @@ void GodotPhysXServer3D::joint_make_pin(RID p_joint, RID p_body_A, const Vector3
 }
 
 void GodotPhysXServer3D::pin_joint_set_param(RID p_joint, PinJointParam p_param, real_t p_value) {
-	// Bullet-era bias / damping / impulse clamp -- unsupported here, as in Jolt.
-	WARN_PRINT_ONCE("PhysX: pin joint parameters are not supported and will be ignored.");
+	// Bullet-era bias / damping / impulse clamp -- unsupported here, as in
+	// Jolt; a warning only when set away from the default (joint nodes and
+	// PhysicalBone3D send the defaults every time).
+	const real_t def = p_param == PIN_JOINT_DAMPING ? 1.0 : (p_param == PIN_JOINT_IMPULSE_CLAMP ? 0.0 : 0.3);
+	if (!Math::is_equal_approx(p_value, def)) {
+		WARN_PRINT_ONCE("PhysX: pin joint parameters are not supported and will be ignored.");
+	}
 }
 real_t GodotPhysXServer3D::pin_joint_get_param(RID p_joint, PinJointParam p_param) const {
 	return 0.0;
@@ -1119,6 +1217,26 @@ uint32_t GodotPhysXServer3D::soft_body_get_collision_mask(RID p_body) const {
 	return soft_body->get_collision_mask();
 }
 
+void GodotPhysXServer3D::body_add_collision_exception(RID p_body, RID p_body_b) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->add_collision_exception(p_body_b);
+}
+
+void GodotPhysXServer3D::body_remove_collision_exception(RID p_body, RID p_body_b) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	body->remove_collision_exception(p_body_b);
+}
+
+void GodotPhysXServer3D::body_get_collision_exceptions(RID p_body, List<RID> *p_exceptions) {
+	GodotPhysXBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	for (const RID &e : body->get_collision_exceptions()) {
+		p_exceptions->push_back(e);
+	}
+}
+
 void GodotPhysXServer3D::soft_body_add_collision_exception(RID p_body, RID p_body_b) {
 	GET_SOFT_BODY_V();
 	soft_body->add_collision_exception(p_body_b);
@@ -1296,6 +1414,21 @@ void GodotPhysXServer3D::soft_body_apply_central_force(RID p_body, const Vector3
 
 void GodotPhysXServer3D::free_rid(RID p_rid) {
 	if (GodotPhysXShape3D *shape = shape_owner.get_or_null(p_rid)) {
+		// Whoever still uses it drops it (they kept a dangling pointer before).
+		LocalVector<GodotPhysXBody3D *> bodies;
+		for (const KeyValue<GodotPhysXBody3D *, int> &E : shape->get_body_owners()) {
+			bodies.push_back(E.key);
+		}
+		for (GodotPhysXBody3D *body : bodies) {
+			body->shape_freed(shape);
+		}
+		LocalVector<GodotPhysXArea3D *> areas;
+		for (const KeyValue<GodotPhysXArea3D *, int> &E : shape->get_area_owners()) {
+			areas.push_back(E.key);
+		}
+		for (GodotPhysXArea3D *area : areas) {
+			area->shape_freed(shape);
+		}
 		shape_owner.free(p_rid);
 		memdelete(shape);
 	} else if (GodotPhysXBody3D *body = body_owner.get_or_null(p_rid)) {

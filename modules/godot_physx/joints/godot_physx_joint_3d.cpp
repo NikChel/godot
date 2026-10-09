@@ -152,11 +152,15 @@ void GodotPhysXJoint3D::_apply_params() {
 			PxRevoluteJoint *j = static_cast<PxRevoluteJoint *>(px_joint);
 			j->setRevoluteJointFlag(PxRevoluteJointFlag::eLIMIT_ENABLED, hinge_use_limit);
 			if (hinge_use_limit) {
-				j->setLimit(PxJointAngularLimitPair((PxReal)hinge_lower, (PxReal)hinge_upper));
+				// Godot's hinge angle runs the other way round to PhysX's
+				// (body B's counter-clockwise turn about the axis relative to
+				// A): [lower, upper] is [-upper, -lower] here, as Jolt maps it.
+				// Passed straight through, a ragdoll's knees bent backwards.
+				j->setLimit(PxJointAngularLimitPair((PxReal)-hinge_upper, (PxReal)-hinge_lower));
 			}
 			j->setRevoluteJointFlag(PxRevoluteJointFlag::eDRIVE_ENABLED, hinge_motor);
 			if (hinge_motor) {
-				j->setDriveVelocity((PxReal)hinge_motor_velocity);
+				j->setDriveVelocity((PxReal)-hinge_motor_velocity); // the other way round too (see the limits)
 				j->setDriveForceLimit((PxReal)(hinge_motor_max_impulse > 0.0 ? hinge_motor_max_impulse : PX_MAX_F32));
 			}
 		} break;
@@ -202,10 +206,17 @@ void GodotPhysXJoint3D::_apply_params() {
 					j->setMotion(ang_axes[a], PxD6Motion::eFREE);
 				}
 			}
-			j->setTwistLimit(PxJointAngularLimitPair((PxReal)axis6[0].ang_lower, (PxReal)axis6[0].ang_upper));
+			// Godot's 6DOF angles run the other way round to PhysX's D6 (as for the hinge above, and as Jolt maps
+			// them): [lower, upper] is [-upper, -lower]. Passed straight through, a ragdoll's asymmetric limits
+			// (knees, elbows) bent the wrong way. The pyramid swing must sit inside (-pi, pi), the twist inside
+			// (-2pi, 2pi): a limit at +-180 deg was silently dropped.
+			const double swing_max = Math::PI - 0.001;
+			const double twist_max = Math::TAU - 0.001;
+			j->setTwistLimit(PxJointAngularLimitPair((PxReal)CLAMP(-axis6[0].ang_upper, -twist_max, twist_max),
+					(PxReal)CLAMP(-axis6[0].ang_lower, -twist_max, twist_max)));
 			j->setPyramidSwingLimit(PxJointLimitPyramid(
-					(PxReal)axis6[1].ang_lower, (PxReal)axis6[1].ang_upper,
-					(PxReal)axis6[2].ang_lower, (PxReal)axis6[2].ang_upper));
+					(PxReal)CLAMP(-axis6[1].ang_upper, -swing_max, swing_max), (PxReal)CLAMP(-axis6[1].ang_lower, -swing_max, swing_max),
+					(PxReal)CLAMP(-axis6[2].ang_upper, -swing_max, swing_max), (PxReal)CLAMP(-axis6[2].ang_lower, -swing_max, swing_max)));
 
 			// Linear drives: a spring (stiffness toward an equilibrium point) and a
 			// velocity motor share the per-axis drive slot.
@@ -246,7 +257,7 @@ void GodotPhysXJoint3D::_apply_params() {
 					continue;
 				}
 				j->setDrive(ang_drives[a], PxD6JointDrive((PxReal)ax.ang_spring_stiffness, (PxReal)ax.ang_spring_damping, PX_MAX_F32));
-				drive_rot = drive_rot * PxQuat((PxReal)ax.ang_spring_eq, ang_drive_axis[a]);
+				drive_rot = drive_rot * PxQuat((PxReal)-ax.ang_spring_eq, ang_drive_axis[a]); // (the other way round too)
 				any_lin_drive = true;
 				if (!(ax.ang_limit && ax.ang_upper > ax.ang_lower)) {
 					j->setMotion(ang_axes[a], PxD6Motion::eFREE);
@@ -392,10 +403,15 @@ void GodotPhysXJoint3D::set_hinge_param(PhysicsServer3D::HingeJointParam p_param
 		case PhysicsServer3D::HINGE_JOINT_MOTOR_MAX_IMPULSE:
 			hinge_motor_max_impulse = p_value;
 			break;
-		default:
-			// Bullet-era bias / softness / relaxation -- unsupported here, as in Jolt.
-			WARN_PRINT_ONCE("PhysX: this hinge joint parameter is not supported and will be ignored.");
-			break;
+		default: {
+			// Bullet-era bias / softness / relaxation -- unsupported here, as in
+			// Jolt. Only worth a warning when set away from its default: joint
+			// nodes and PhysicalBone3D send the defaults every time.
+			const real_t def = p_param == PhysicsServer3D::HINGE_JOINT_LIMIT_SOFTNESS ? 0.9 : (p_param == PhysicsServer3D::HINGE_JOINT_LIMIT_RELAXATION ? 1.0 : 0.3);
+			if (!Math::is_equal_approx(p_value, def)) {
+				WARN_PRINT_ONCE("PhysX: this hinge joint parameter is not supported and will be ignored.");
+			}
+		} break;
 	}
 	_apply_params();
 }
@@ -466,8 +482,12 @@ void GodotPhysXJoint3D::set_cone_twist_param(PhysicsServer3D::ConeTwistJointPara
 	} else if (p_param == PhysicsServer3D::CONE_TWIST_JOINT_TWIST_SPAN) {
 		cone_twist = CLAMP(p_value, (real_t)0.01, (real_t)Math::PI);
 	} else {
-		// Bullet-era bias / softness / relaxation -- unsupported here, as in Jolt.
-		WARN_PRINT_ONCE("PhysX: this cone-twist joint parameter is not supported and will be ignored.");
+		// Bullet-era bias / softness / relaxation -- unsupported here, as in
+		// Jolt; a warning only when set away from the default (see the hinge).
+		const real_t def = p_param == PhysicsServer3D::CONE_TWIST_JOINT_SOFTNESS ? 0.8 : (p_param == PhysicsServer3D::CONE_TWIST_JOINT_RELAXATION ? 1.0 : 0.3);
+		if (!Math::is_equal_approx(p_value, def)) {
+			WARN_PRINT_ONCE("PhysX: this cone-twist joint parameter is not supported and will be ignored.");
+		}
 	}
 	_apply_params();
 }

@@ -38,13 +38,22 @@ def get_doc_classes():
     return [
         "PhysXParticleFluid3D",
         "PhysXCloth3D",
+        "PhysXSkinnedCloth3D",
         "PhysXChunkEmitter3D",
         "PhysXDestructible3D",
         "PhysXBlastAsset",
+        "PhysXFlow3D",
+        "PhysXFlowEmitter3D",
+        "PhysXFlowRenderEffect",
         "PhysXVehicle3D",
         "PhysXVehicleWheel3D",
         "PhysXMotorcycle3D",
         "PhysXTank3D",
+        "PhysXWaterSurface3D",
+        "PhysXBuoyancy3D",
+        "PhysXBoat3D",
+        "PhysXWaterWake3D",
+        "PhysXWaterSpray3D",
     ]
 
 

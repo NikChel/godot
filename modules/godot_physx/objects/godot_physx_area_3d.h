@@ -42,6 +42,7 @@
 
 namespace physx {
 class PxRigidActor;
+class PxShape;
 } //namespace physx
 
 class GodotPhysXSpace3D;
@@ -78,9 +79,13 @@ private:
 	LocalVector<ShapeRef> shapes;
 	Transform3D area_transform;
 	Vector3 built_scale = Vector3(1, 1, 1); // node scale baked into shapes on last _build_actor()
+	// The PhysX trigger shape built for each entry of `shapes` (nullptr: disabled / invalid), while the actor exists --
+	// a shape edit updates it in place instead of rebuilding the actor (which took every overlap back).
+	LocalVector<physx::PxShape *> px_shapes;
 	uint32_t collision_layer = 1;
 	uint32_t collision_mask = 1;
 	bool monitorable = false;
+	bool ray_pickable = true; // input_ray_pickable: hit by the viewport's picking ray
 
 	// Space overrides applied to overlapping bodies (see apply_overrides()).
 	PhysicsServer3D::AreaSpaceOverrideMode gravity_override_mode = PhysicsServer3D::AREA_SPACE_OVERRIDE_DISABLED;
@@ -121,6 +126,17 @@ private:
 	};
 	HashMap<OverlapKey, OverlapState, OverlapKeyHasher> pending;
 
+	// The live (body, shape pair) overlaps and their refcounts. PhysX reports a destroyed actor's trigger pairs as
+	// REMOVED (pointers no longer usable), so an actor rebuild / removal takes its pairs back here instead: an exit is
+	// queued per pair, and a rebuilt actor that still overlaps re-reports an enter on the next step -- the two cancel
+	// in call_queries() (no signals), a body that really left gets its body_exited.
+	struct ActivePair {
+		GodotPhysXBody3D *body = nullptr;
+		int count = 0;
+	};
+	HashMap<OverlapKey, ActivePair, OverlapKeyHasher> active_pairs;
+	void _release_all_pairs();
+
 	Callable area_monitor_callback;
 
 	// (other_area_rid, other_shape << 16 | self_shape) -- same key shape as
@@ -145,6 +161,9 @@ private:
 	void _destroy_actor();
 	void _build_actor();
 	void _apply_filter_data();
+	physx::PxShape *_create_px_shape(uint32_t p_idx);
+	bool _edit_shape_in_place(uint32_t p_idx);
+	void _release_area_shape_pairs(int p_area_shape);
 
 public:
 	void set_self(const RID &p_self) { self = p_self; }
@@ -175,6 +194,9 @@ public:
 
 	void set_monitorable(bool p_monitorable) { monitorable = p_monitorable; }
 	bool is_monitorable() const { return monitorable; }
+
+	void set_ray_pickable(bool p_enable) { ray_pickable = p_enable; }
+	bool is_ray_pickable() const { return ray_pickable; }
 
 	void set_monitor_callback(const Callable &p_callback) { monitor_callback = p_callback; }
 
@@ -212,6 +234,14 @@ public:
 	void report_body_overlap(GodotPhysXBody3D *p_body, int p_body_shape, int p_area_shape, bool p_entered);
 	// Called when a body leaves the simulation while still overlapping.
 	void body_removed(GodotPhysXBody3D *p_body) { overlapping_bodies.erase(p_body); }
+	// A body's PhysX actor is being destroyed (rebuilt or removed): queue an exit for each pair it holds here.
+	void body_actor_gone(GodotPhysXBody3D *p_body);
+	// A shape this area uses changed its data: rebuild the actor with it.
+	void shape_changed(GodotPhysXShape3D *p_shape);
+	// The shape is being freed: drop every entry using it.
+	void shape_freed(GodotPhysXShape3D *p_shape);
+	// One of `p_body`'s shapes left its actor (swapped / disabled in place): take that shape's overlaps back.
+	void body_shape_gone(GodotPhysXBody3D *p_body, int p_body_shape);
 
 	// Called once per physics step, once per (this, p_other) pair where this
 	// area wants_area_monitoring() and p_other->is_monitorable() -- see

@@ -71,6 +71,20 @@ GodotPhysXShape3D::~GodotPhysXShape3D() {
 	_release_meshes();
 }
 
+void GodotPhysXShape3D::remove_owner(GodotPhysXBody3D *p_body) {
+	HashMap<GodotPhysXBody3D *, int>::Iterator it = body_owners.find(p_body);
+	if (it && --it->value <= 0) {
+		body_owners.remove(it);
+	}
+}
+
+void GodotPhysXShape3D::remove_owner(GodotPhysXArea3D *p_area) {
+	HashMap<GodotPhysXArea3D *, int>::Iterator it = area_owners.find(p_area);
+	if (it && --it->value <= 0) {
+		area_owners.remove(it);
+	}
+}
+
 void GodotPhysXShape3D::_release_meshes() {
 	if (convex_mesh) {
 		convex_mesh->release();
@@ -86,10 +100,26 @@ void GodotPhysXShape3D::_release_meshes() {
 	}
 }
 
+int GodotPhysXShape3D::source_face_index(uint32_t p_cooked_index, bool &r_back) const {
+	r_back = false;
+	if (!triangle_mesh || source_triangle_count <= 0 || p_cooked_index >= triangle_mesh->getNbTriangles()) {
+		return -1;
+	}
+	const PxU32 *remap = triangle_mesh->getTrianglesRemap();
+	uint32_t source = remap ? remap[p_cooked_index] : p_cooked_index;
+	if (source >= (uint32_t)source_triangle_count) {
+		r_back = true;
+		source -= (uint32_t)source_triangle_count;
+	}
+	return (int)source;
+}
+
 void GodotPhysXShape3D::set_data(const Variant &p_data) {
 	data = p_data;
 	geom_valid = false;
 	geom = GodotPhysXShapeGeometry();
+	backface_collision = false;
+	source_triangle_count = 0;
 
 	switch (type) {
 		case PhysicsServer3D::SHAPE_SPHERE: {
@@ -169,7 +199,9 @@ void GodotPhysXShape3D::set_data(const Variant &p_data) {
 		case PhysicsServer3D::SHAPE_CONCAVE_POLYGON: {
 			Vector<Vector3> faces;
 			if (p_data.get_type() == Variant::DICTIONARY) {
-				faces = ((Dictionary)p_data).get("faces", Vector<Vector3>());
+				const Dictionary d = p_data;
+				faces = d.get("faces", Vector<Vector3>());
+				backface_collision = d.get("backface_collision", false);
 			} else {
 				faces = p_data;
 			}
@@ -178,10 +210,13 @@ void GodotPhysXShape3D::set_data(const Variant &p_data) {
 			ERR_FAIL_NULL(physics);
 
 			const int tri_count = faces.size() / 3;
+			// Back faces on: a flipped copy of every triangle after the
+			// originals (see source_face_index()).
+			const int cooked_tri_count = backface_collision ? tri_count * 2 : tri_count;
 			LocalVector<PxVec3> verts;
 			LocalVector<PxU32> indices;
 			verts.resize(faces.size());
-			indices.resize(faces.size());
+			indices.resize(cooked_tri_count * 3);
 			for (int i = 0; i < faces.size(); i++) {
 				verts[i] = to_px(faces[i]);
 			}
@@ -192,12 +227,19 @@ void GodotPhysXShape3D::set_data(const Variant &p_data) {
 				indices[t * 3 + 1] = t * 3 + 2;
 				indices[t * 3 + 2] = t * 3 + 1;
 			}
+			for (int t = tri_count; t < cooked_tri_count; t++) {
+				const int s = t - tri_count;
+				indices[t * 3 + 0] = s * 3 + 0;
+				indices[t * 3 + 1] = s * 3 + 1;
+				indices[t * 3 + 2] = s * 3 + 2;
+			}
+			source_triangle_count = tri_count;
 
 			PxTriangleMeshDesc desc;
 			desc.points.count = verts.size();
 			desc.points.stride = sizeof(PxVec3);
 			desc.points.data = verts.ptr();
-			desc.triangles.count = tri_count;
+			desc.triangles.count = cooked_tri_count;
 			desc.triangles.stride = 3 * sizeof(PxU32);
 			desc.triangles.data = indices.ptr();
 
@@ -322,9 +364,16 @@ void GodotPhysXShape3D::set_data(const Variant &p_data) {
 			print_verbose(vformat("PhysX: built %dx%d height field (range %.2f).", width, depth, (double)range));
 		} break;
 
+		case PhysicsServer3D::SHAPE_SEPARATION_RAY: {
+			const Dictionary d = p_data;
+			ray_length = d.get("length", 1.0);
+			ray_slide_on_slope = d.get("slide_on_slope", false);
+			// No geometry: see is_separation_ray().
+		} break;
+
 		default: {
-			// Separation ray and custom shapes aren't implemented; keep the
-			// shape valid-but-inert so RID lifecycle stays clean.
+			// Custom shapes aren't implemented; keep the shape valid-but-inert
+			// so RID lifecycle stays clean.
 			WARN_PRINT_ONCE(vformat("PhysX: shape type %d not implemented; treated as no collision.", (int)type));
 		} break;
 	}

@@ -145,6 +145,7 @@ public:
 	virtual void area_set_collision_mask(RID p_area, uint32_t p_mask) override;
 	virtual uint32_t area_get_collision_mask(RID p_area) const override;
 	virtual void area_set_monitorable(RID p_area, bool p_monitorable) override;
+	virtual void area_set_ray_pickable(RID p_area, bool p_enable) override;
 	virtual void area_set_monitor_callback(RID p_area, const Callable &p_callback) override;
 	virtual void area_set_area_monitor_callback(RID p_area, const Callable &p_callback) override;
 
@@ -176,6 +177,8 @@ public:
 	virtual void body_set_enable_continuous_collision_detection(RID p_body, bool p_enable) override;
 	virtual bool body_is_continuous_collision_detection_enabled(RID p_body) const override;
 
+	virtual void body_set_ray_pickable(RID p_body, bool p_enable) override;
+
 	virtual void body_set_param(RID p_body, BodyParameter p_param, const Variant &p_value) override;
 	virtual Variant body_get_param(RID p_body, BodyParameter p_param) const override;
 
@@ -186,6 +189,21 @@ public:
 	virtual void body_apply_impulse(RID p_body, const Vector3 &p_impulse, const Vector3 &p_position = Vector3()) override;
 	virtual void body_apply_torque_impulse(RID p_body, const Vector3 &p_impulse) override;
 	virtual void body_apply_central_force(RID p_body, const Vector3 &p_force) override;
+	virtual void body_apply_force(RID p_body, const Vector3 &p_force, const Vector3 &p_position = Vector3()) override;
+	virtual void body_apply_torque(RID p_body, const Vector3 &p_torque) override;
+
+	virtual void body_add_constant_central_force(RID p_body, const Vector3 &p_force) override;
+	virtual void body_add_constant_force(RID p_body, const Vector3 &p_force, const Vector3 &p_position = Vector3()) override;
+	virtual void body_add_constant_torque(RID p_body, const Vector3 &p_torque) override;
+
+	virtual void body_set_constant_force(RID p_body, const Vector3 &p_force) override;
+	virtual Vector3 body_get_constant_force(RID p_body) const override;
+
+	virtual void body_set_constant_torque(RID p_body, const Vector3 &p_torque) override;
+	virtual Vector3 body_get_constant_torque(RID p_body) const override;
+
+	virtual void body_set_axis_velocity(RID p_body, const Vector3 &p_axis_velocity) override;
+	virtual void body_reset_mass_properties(RID p_body) override;
 
 	virtual void body_set_axis_lock(RID p_body, BodyAxis p_axis, bool p_lock) override;
 	virtual bool body_is_axis_locked(RID p_body, BodyAxis p_axis) const override;
@@ -292,6 +310,10 @@ public:
 	virtual uint32_t soft_body_get_collision_layer(RID p_body) const override;
 	virtual void soft_body_set_collision_mask(RID p_body, uint32_t p_mask) override;
 	virtual uint32_t soft_body_get_collision_mask(RID p_body) const override;
+	virtual void body_add_collision_exception(RID p_body, RID p_body_b) override;
+	virtual void body_remove_collision_exception(RID p_body, RID p_body_b) override;
+	virtual void body_get_collision_exceptions(RID p_body, List<RID> *p_exceptions) override;
+
 	virtual void soft_body_add_collision_exception(RID p_body, RID p_body_b) override;
 	virtual void soft_body_remove_collision_exception(RID p_body, RID p_body_b) override;
 	virtual void soft_body_get_collision_exceptions(RID p_body, List<RID> *p_exceptions) override;

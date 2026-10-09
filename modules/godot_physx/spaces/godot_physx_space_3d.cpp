@@ -83,14 +83,40 @@ PxFilterFlags godot_physx_filter_shader(
 	}
 
 	pair_flags = PxPairFlag::eCONTACT_DEFAULT;
-	if ((filter_data0.word2 | filter_data1.word2) & 1u) {
+	if ((filter_data0.word2 | filter_data1.word2) & GodotPhysXBody3D::FILTER_REPORTS_CONTACTS) {
 		pair_flags |= PxPairFlag::eNOTIFY_TOUCH_FOUND |
 				PxPairFlag::eNOTIFY_TOUCH_PERSISTS |
 				PxPairFlag::eNOTIFY_TOUCH_LOST |
 				PxPairFlag::eNOTIFY_CONTACT_POINTS;
 	}
+	// A body with collision exceptions: the (stateless) shader can't look
+	// them up, so its pairs go to g_filter_callback to decide.
+	if ((filter_data0.word2 | filter_data1.word2) & GodotPhysXBody3D::FILTER_HAS_EXCEPTIONS) {
+		return PxFilterFlag::eCALLBACK;
+	}
 	return PxFilterFlag::eDEFAULT;
 }
+
+// Collision exceptions (add_collision_exception_with()): a pair where either
+// body excepts the other never collides. Only pairs the shader flags reach it.
+class ExceptionFilterCallback : public PxSimulationFilterCallback {
+	static const GodotPhysXBody3D *_body(const PxActor *p_actor, const PxFilterData &p_data) {
+		return p_actor && p_data.word3 == GodotPhysXBody3D::FILTER_BODY_MARKER ? static_cast<const GodotPhysXBody3D *>(p_actor->userData) : nullptr;
+	}
+
+public:
+	virtual PxFilterFlags pairFound(PxU64, PxFilterObjectAttributes, PxFilterData p_data0, const PxActor *p_a0, const PxShape *,
+			PxFilterObjectAttributes, PxFilterData p_data1, const PxActor *p_a1, const PxShape *, PxPairFlags &) override {
+		const GodotPhysXBody3D *b0 = _body(p_a0, p_data0);
+		const GodotPhysXBody3D *b1 = _body(p_a1, p_data1);
+		if (b0 && b1 && (b0->has_collision_exception(b1->get_self()) || b1->has_collision_exception(b0->get_self()))) {
+			return PxFilterFlag::eSUPPRESS;
+		}
+		return PxFilterFlag::eDEFAULT;
+	}
+	virtual void pairLost(PxU64, PxFilterObjectAttributes, PxFilterData, PxFilterObjectAttributes, PxFilterData, bool) override {}
+	virtual bool statusChange(PxU64 &, PxPairFlags &, PxFilterFlags &) override { return false; }
+};
 
 // Stateless: reaches bodies through PxActor::userData, so one instance is shared
 // by every scene.
@@ -171,6 +197,7 @@ public:
 };
 
 ContactCallback g_contact_callback;
+ExceptionFilterCallback g_filter_callback;
 
 } //namespace
 
@@ -182,6 +209,7 @@ GodotPhysXSpace3D::GodotPhysXSpace3D(PxPhysics *p_physics, PxDefaultCpuDispatche
 	scene_desc.gravity = to_px(gravity);
 	scene_desc.cpuDispatcher = p_dispatcher;
 	scene_desc.filterShader = godot_physx_filter_shader;
+	scene_desc.filterCallback = &g_filter_callback;
 	scene_desc.simulationEventCallback = &g_contact_callback;
 	scene_desc.flags |= PxSceneFlag::eENABLE_ACTIVE_ACTORS;
 	if (GodotPhysXProjectSettings::stabilization) {
@@ -308,6 +336,10 @@ void GodotPhysXSpace3D::step(real_t p_step) {
 	for (GodotPhysXBody3D *body : force_integrators) {
 		body->call_force_integration();
 	}
+	for (GodotPhysXBody3D *body : constant_force_bodies) {
+		body->apply_constant_forces();
+	}
+	_apply_separation_rays(p_step);
 
 	_apply_area_overrides();
 	_detect_area_overlaps();
@@ -373,6 +405,18 @@ void GodotPhysXSpace3D::step(real_t p_step) {
 	awake_bodies = now_awake;
 }
 
+void GodotPhysXSpace3D::body_actor_gone(GodotPhysXBody3D *p_body) {
+	for (GodotPhysXArea3D *area : areas) {
+		area->body_actor_gone(p_body);
+	}
+}
+
+void GodotPhysXSpace3D::body_shape_gone(GodotPhysXBody3D *p_body, int p_shape) {
+	for (GodotPhysXArea3D *area : areas) {
+		area->body_shape_gone(p_body, p_shape);
+	}
+}
+
 void GodotPhysXSpace3D::body_removed_from_areas(GodotPhysXBody3D *p_body) {
 	for (GodotPhysXArea3D *area : areas) {
 		area->body_removed(p_body);
@@ -406,6 +450,16 @@ void GodotPhysXSpace3D::_detect_area_overlaps() {
 	}
 }
 
+void GodotPhysXSpace3D::set_default_damping(real_t p_linear, real_t p_angular) {
+	default_linear_damp = p_linear;
+	default_angular_damp = p_angular;
+	for (GodotPhysXBody3D *body : bodies) {
+		if (!area_damped_bodies.has(body)) {
+			body->set_area_damping(default_linear_damp, default_angular_damp);
+		}
+	}
+}
+
 void GodotPhysXSpace3D::_apply_area_overrides() {
 	// Gather, per body, the areas that impose a gravity/damp/wind override.
 	HashMap<GodotPhysXBody3D *, LocalVector<GodotPhysXArea3D *>> affected;
@@ -425,6 +479,7 @@ void GodotPhysXSpace3D::_apply_area_overrides() {
 		}
 	}
 
+	HashSet<GodotPhysXBody3D *> damped_now;
 	for (KeyValue<GodotPhysXBody3D *, LocalVector<GodotPhysXArea3D *>> &E : affected) {
 		GodotPhysXBody3D *body = E.key;
 		LocalVector<GodotPhysXArea3D *> &list = E.value;
@@ -432,10 +487,12 @@ void GodotPhysXSpace3D::_apply_area_overrides() {
 
 		const Vector3 pos = body->get_transform().origin;
 		const real_t mass = MAX(body->get_mass(), (real_t)0.0001);
+		const real_t gravity_scale = body->get_gravity_scale();
 
+		// Areas build on the space's defaults: COMBINE adds, REPLACE replaces.
 		Vector3 grav = gravity;
-		real_t lin_damp = 0.0;
-		real_t ang_damp = 0.0;
+		real_t lin_damp = default_linear_damp;
+		real_t ang_damp = default_angular_damp;
 		Vector3 wind;
 
 		for (GodotPhysXArea3D *area : list) {
@@ -478,20 +535,31 @@ void GodotPhysXSpace3D::_apply_area_overrides() {
 			wind += area->wind_at(pos);
 		}
 
-		// Gravity delta relative to the world default (bodies already get world
-		// gravity from the scene), plus wind, plus a velocity-proportional drag
-		// standing in for the area's damping contribution.
-		Vector3 force = (grav - gravity) * mass + wind;
-		force += -lin_damp * mass * body->get_linear_velocity();
-		Vector3 torque = -ang_damp * mass * body->get_angular_velocity();
-
+		// Gravity delta relative to what the scene already gives the body (the
+		// world default, or nothing at gravity_scale 0), times its gravity
+		// scale, plus wind, as a force; the damping goes to the body's own
+		// solver damping, combined with its own per its modes.
+		const Vector3 builtin = gravity_scale == 0.0 ? Vector3() : gravity;
+		const Vector3 force = (grav * gravity_scale - builtin) * mass + wind;
 		if (!force.is_zero_approx()) {
 			body->apply_central_force(force);
 		}
-		if (!torque.is_zero_approx()) {
-			body->apply_torque(torque);
+		body->set_area_damping(lin_damp, ang_damp);
+		damped_now.insert(body);
+	}
+	// gravity_scale other than 0 / 1 outside any overriding area: the rest of the scaled world gravity.
+	for (GodotPhysXBody3D *body : gravity_scaled_bodies) {
+		if (!affected.has(body)) {
+			body->apply_gravity_delta(gravity * (body->get_gravity_scale() - 1.0) * MAX(body->get_mass(), (real_t)0.0001));
 		}
 	}
+	// Bodies that left every overriding area go back to the defaults.
+	for (GodotPhysXBody3D *body : area_damped_bodies) {
+		if (!damped_now.has(body)) {
+			body->set_area_damping(default_linear_damp, default_angular_damp);
+		}
+	}
+	area_damped_bodies = damped_now;
 }
 
 void GodotPhysXSpace3D::call_queries() {
@@ -519,6 +587,7 @@ namespace {
 class MotionFilter : public PxQueryFilterCallback {
 public:
 	const PxRigidActor *self_actor = nullptr;
+	const GodotPhysXBody3D *self_body = nullptr;
 	const HashSet<RID> *exclude_bodies = nullptr;
 	const HashSet<ObjectID> *exclude_objects = nullptr;
 	uint32_t self_layer = 0;
@@ -538,6 +607,10 @@ public:
 		if (exclude_bodies && exclude_bodies->has(b->get_self())) {
 			return PxQueryHitType::eNONE;
 		}
+		// Collision exceptions, either way round (as Godot Physics' motion test).
+		if (self_body && (self_body->has_collision_exception(b->get_self()) || b->has_collision_exception(self_body->get_self()))) {
+			return PxQueryHitType::eNONE;
+		}
 		if (exclude_objects && exclude_objects->has(b->get_instance_id())) {
 			return PxQueryHitType::eNONE;
 		}
@@ -553,6 +626,101 @@ public:
 		return PxQueryHitType::eBLOCK;
 	}
 };
+
+// One-sided trimeshes (backface_collision off) in the motion test. PhysX's
+// overlap and penetration queries treat every mesh triangle as two-sided, so
+// a body deep in a one-sided mesh from behind -- jumping up through a one-way
+// platform -- got pushed out of its front and reported as standing on it.
+// Jolt skips a triangle whose plane has the shape's center behind it; the same
+// check runs here, but only for deep overlaps: a body resting on or walking
+// over a mesh overlaps it by about the margin and never pays for it. (A
+// sweep's initial-overlap MTD can report a deep overlap as ~0 deep, so that
+// path always checks -- it only runs when a sweep starts inside a mesh.)
+// And a body already moving out the way it would be pushed is left to its own
+// motion -- pushing it there would land it on the surface mid-jump.
+constexpr PxReal ONE_SIDED_DEEP_PENETRATION = 0.05f;
+constexpr PxReal ONE_SIDED_MOVING_OUT = 0.5f; // cos of the angle between motion and push-out
+constexpr PxU32 ONE_SIDED_MAX_TRIANGLES = 64;
+
+bool is_one_sided_trimesh(const PxRigidActor *p_actor, const PxShape *p_shape) {
+	if (!p_actor || !p_shape || p_shape->getGeometry().getType() != PxGeometryType::eTRIANGLEMESH) {
+		return false;
+	}
+	const GodotPhysXBody3D *body = static_cast<const GodotPhysXBody3D *>(p_actor->userData);
+	const GodotPhysXBody3D::ShapeRef *sr = body ? body->get_shape_ref((int)reinterpret_cast<uintptr_t>(p_shape->userData)) : nullptr;
+	return sr && sr->shape && !sr->shape->has_backface_collision();
+}
+
+// True when the shape's center is behind every mesh triangle it overlaps.
+bool behind_one_sided_mesh(const PxGeometry &p_geom, const PxTransform &p_pose, const PxShape *p_mesh_shape, const PxTransform &p_mesh_pose) {
+	const PxTriangleMeshGeometry &mesh = static_cast<const PxTriangleMeshGeometry &>(p_mesh_shape->getGeometry());
+	PxU32 tris[ONE_SIDED_MAX_TRIANGLES];
+	bool overflow = false;
+	const PxU32 count = PxMeshQuery::findOverlapTriangleMesh(p_geom, p_pose, mesh, p_mesh_pose, tris, ONE_SIDED_MAX_TRIANGLES, 0, overflow);
+	if (count == 0 || overflow) {
+		return false;
+	}
+	for (PxU32 i = 0; i < count; i++) {
+		PxTriangle tri;
+		PxMeshQuery::getTriangle(mesh, p_mesh_pose, tris[i], tri);
+		PxVec3 normal;
+		tri.normal(normal);
+		if (normal.dot(p_pose.p - tri.verts[0]) >= 0.0f) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// A SeparationRayShape3D on a body: it runs along the shape's +Z from the
+// shape's origin, length scaled with the shape.
+struct SeparationRay {
+	PxVec3 origin;
+	PxVec3 dir;
+	PxReal length = 0.0f;
+	bool slide_on_slope = false;
+};
+
+SeparationRay separation_ray(const GodotPhysXShape3D *p_shape, const PxTransform &p_body_pose, const Transform3D &p_shape_xform, const Vector3 &p_body_scale) {
+	const PxTransform pose = p_body_pose * to_px(p_shape_xform);
+	SeparationRay ray;
+	ray.origin = pose.p;
+	ray.dir = pose.q.rotate(PxVec3(0.0f, 0.0f, 1.0f));
+	ray.length = (PxReal)(p_shape->get_ray_length() * (p_body_scale * p_shape_xform.basis.get_scale()).z);
+	ray.slide_on_slope = p_shape->is_ray_sliding_on_slope();
+	return ray;
+}
+
+// How far a separation ray's tip is past what it hit, and which way that
+// pushes the body: back along the ray, or (slide_on_slope) out along the
+// surface normal. False if the tip isn't in anything.
+bool separation_ray_push(const SeparationRay &p_ray, const PxRaycastHit &p_hit, PxVec3 &r_dir, PxReal &r_amount) {
+	const PxReal depth = p_ray.length - p_hit.distance;
+	if (depth <= 0.0f) {
+		return false;
+	}
+	if (p_ray.slide_on_slope) {
+		r_dir = p_hit.normal;
+		r_amount = depth * p_hit.normal.dot(-p_ray.dir);
+	} else {
+		r_dir = -p_ray.dir;
+		r_amount = depth;
+	}
+	return r_amount > 0.0f;
+}
+
+// Whether to ignore an initial overlap of a motion test's shape with a mesh.
+// p_depth < 0: depth unknown, always check.
+bool skip_one_sided_overlap(const PxRigidActor *p_actor, const PxShape *p_shape, PxReal p_depth, const PxVec3 &p_push_dir, const PxVec3 &p_motion_dir,
+		const PxGeometry &p_geom, const PxTransform &p_pose) {
+	if (!is_one_sided_trimesh(p_actor, p_shape)) {
+		return false;
+	}
+	if (p_motion_dir.dot(p_push_dir) > ONE_SIDED_MOVING_OUT) {
+		return true;
+	}
+	return (p_depth < 0.0f || p_depth > ONE_SIDED_DEEP_PENETRATION) && behind_one_sided_mesh(p_geom, p_pose, p_shape, p_actor->getGlobalPose() * p_shape->getLocalPose());
+}
 
 } //namespace
 
@@ -579,11 +747,13 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 
 	MotionFilter filter;
 	filter.self_actor = p_body->get_px_actor();
+	filter.self_body = p_body;
 	filter.exclude_bodies = &p_params.exclude_bodies;
 	filter.exclude_objects = &p_params.exclude_objects;
 	filter.self_layer = p_body->get_collision_layer();
 	filter.self_mask = p_body->get_collision_mask();
 	PxQueryFilterData fd(PxQueryFlag::eSTATIC | PxQueryFlag::eDYNAMIC | PxQueryFlag::ePREFILTER);
+	const PxVec3 motion_dir = p_params.motion.length() > CMP_EPSILON ? to_px(p_params.motion.normalized()) : PxVec3(0.0f);
 
 	// --- Depenetration recovery -------------------------------------------------
 	PxVec3 recover(0.0f);
@@ -600,6 +770,28 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 		bool any = false;
 		for (int i = 0; i < shape_count; i++) {
 			const GodotPhysXBody3D::ShapeRef *sr = p_body->get_shape_ref(i);
+			if (sr && !sr->disabled && sr->shape && sr->shape->is_separation_ray()) {
+				// Push the body back until the ray's tip sits on what it hit --
+				// the character stands on the ray (and steps up onto ledges
+				// lower than it reaches).
+				const SeparationRay ray = separation_ray(sr->shape, PxTransform(recover) * to_px(p_params.from), sr->xform, motion_scale);
+				PxRaycastBuffer rh;
+				PxVec3 push_dir;
+				PxReal amount;
+				if (px_scene->raycast(ray.origin, ray.dir, ray.length, rh, PxHitFlag::ePOSITION | PxHitFlag::eNORMAL, fd, &filter) &&
+						rh.hasBlock && separation_ray_push(ray, rh.block, push_dir, amount)) {
+					iter_recover += push_dir * amount;
+					any = true;
+					if (iter == 0 && amount > rec_depth) {
+						rec_depth = amount;
+						rec_normal = push_dir;
+						rec_point = rh.block.position;
+						rec_actor = rh.block.actor;
+						rec_shape = rh.block.shape;
+					}
+				}
+				continue;
+			}
 			if (!sr || !sr->shape || !sr->shape->is_valid()) {
 				continue;
 			}
@@ -616,6 +808,9 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 				PxF32 depth;
 				const PxTransform other_pose = h.actor->getGlobalPose() * h.shape->getLocalPose();
 				if (PxGeometryQuery::computePenetration(dir, depth, sg.geom.any(), pose, h.shape->getGeometry(), other_pose)) {
+					if (skip_one_sided_overlap(h.actor, h.shape, depth, dir, motion_dir, sg.geom.any(), pose)) {
+						continue;
+					}
 					iter_recover += dir * (depth + margin);
 					any = true;
 					if (iter == 0 && depth > rec_depth) {
@@ -651,6 +846,32 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 		const PxVec3 unit_dir = to_px(p_params.motion / motion_len);
 		for (int i = 0; i < shape_count; i++) {
 			const GodotPhysXBody3D::ShapeRef *sr = p_body->get_shape_ref(i);
+			if (sr && !sr->disabled && sr->shape && sr->shape->is_separation_ray()) {
+				// Rays only take part in the motion when snapping to the floor
+				// (collide_separation_ray), or acting as a regular shape with
+				// slide_on_slope -- as on Godot Physics and Jolt. The tip moves
+				// with the body; cast it along the motion.
+				if (!p_params.collide_separation_ray && !sr->shape->is_ray_sliding_on_slope()) {
+					continue;
+				}
+				const SeparationRay ray = separation_ray(sr->shape, recovered_from, sr->xform, motion_scale);
+				PxRaycastBuffer rh;
+				if (px_scene->raycast(ray.origin + ray.dir * ray.length, unit_dir, (PxReal)motion_len, rh, PxHitFlag::ePOSITION | PxHitFlag::eNORMAL, fd, &filter) &&
+						rh.hasBlock && rh.block.normal.dot(-unit_dir) >= 0.001f) {
+					const real_t frac = CLAMP((real_t)rh.block.distance / motion_len, (real_t)0.0, (real_t)1.0);
+					if (frac < safe_fraction) {
+						safe_fraction = frac;
+						best_hit.actor = rh.block.actor;
+						best_hit.shape = rh.block.shape;
+						best_hit.position = rh.block.position;
+						best_hit.normal = rh.block.normal;
+						best_hit.distance = rh.block.distance;
+						best_hit.faceIndex = rh.block.faceIndex;
+						has_hit = true;
+					}
+				}
+				continue;
+			}
 			if (!sr || !sr->shape || !sr->shape->is_valid()) {
 				continue;
 			}
@@ -689,6 +910,9 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 				// height-field terrain (computePenetration() rejects those).
 				if (hit.block.distance <= 0.0f) {
 					const PxF32 pen = -hit.block.distance;
+					if (skip_one_sided_overlap(hit.block.actor, hit.block.shape, -1.0f, hit.block.normal, motion_dir, sg.geom.any(), pose)) {
+						continue;
+					}
 					mtd_recover += hit.block.normal * (pen + margin);
 					// Only report a floor-like overlap so move_and_slide keeps a
 					// character grounded. Near-horizontal push-outs here are
@@ -759,4 +983,97 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 	}
 
 	return has_hit || (p_params.recovery_as_collision && rec_depth > (PxReal)CMP_EPSILON);
+}
+
+void GodotPhysXSpace3D::_apply_separation_rays(real_t p_step) {
+	if (separation_ray_bodies.is_empty() || p_step <= 0.0) {
+		return;
+	}
+	// Each ray whose tip is in something gets an impulse at the contact, like
+	// an inelastic solver contact along the ray (or the surface normal with
+	// slide_on_slope), with friction: it stops the tip sinking further,
+	// and lifts out only the depth past a small slop, a fraction per step
+	// (Baumgarte). Lifting it out in one step kicks a body hard enough to flip
+	// it when one ray meets a bump, and a bigger lift than that keeps pumping
+	// energy in -- a sled on four rays rocked over a bump forever. Friction
+	// (the two materials' coefficients combined as on Jolt, sqrt(a * b)) then
+	// stops the contact sliding, up to mu times that push. Whatever it stands
+	// on gets the opposite impulse if it's dynamic.
+	constexpr PxReal SLOP = 0.02f; // m, as Jolt's penetration slop
+	constexpr PxReal BAUMGARTE = 0.2f;
+	constexpr PxReal MAX_SEPARATION_SPEED = 4.0f; // m/s
+	for (GodotPhysXBody3D *body : separation_ray_bodies) {
+		PxRigidDynamic *dyn = body->get_px_actor() ? body->get_px_actor()->is<PxRigidDynamic>() : nullptr;
+		if (!dyn || !dyn->getScene() || dyn->isSleeping()) {
+			continue;
+		}
+		MotionFilter filter;
+		filter.self_actor = dyn;
+		filter.self_body = body;
+		filter.self_layer = body->get_collision_layer();
+		filter.self_mask = body->get_collision_mask();
+		const PxQueryFilterData fd(PxQueryFlag::eSTATIC | PxQueryFlag::eDYNAMIC | PxQueryFlag::ePREFILTER);
+
+		const PxTransform pose = dyn->getGlobalPose();
+		const PxVec3 com = pose.transform(dyn->getCMassLocalPose().p);
+		const Vector3 scale = body->get_transform().basis.get_scale();
+		for (int i = 0; i < body->get_shape_count(); i++) {
+			const GodotPhysXBody3D::ShapeRef *sr = body->get_shape_ref(i);
+			if (!sr || sr->disabled || !sr->shape || !sr->shape->is_separation_ray()) {
+				continue;
+			}
+			const SeparationRay ray = separation_ray(sr->shape, pose, sr->xform, scale);
+			PxRaycastBuffer rh;
+			PxVec3 n;
+			PxReal amount;
+			if (!px_scene->raycast(ray.origin, ray.dir, ray.length, rh, PxHitFlag::ePOSITION | PxHitFlag::eNORMAL, fd, &filter) ||
+					!rh.hasBlock || !separation_ray_push(ray, rh.block, n, amount)) {
+				continue;
+			}
+			const PxVec3 contact = rh.block.position;
+			const PxVec3 r = contact - com;
+			// Velocity change at the contact, along n, per unit impulse.
+			PxVec3 dl, da;
+			PxRigidBodyExt::computeVelocityDeltaFromImpulse(*dyn, n, r.cross(n), dl, da);
+			const PxReal k = dl.dot(n) + da.cross(r).dot(n);
+			if (k <= 0.0f) {
+				continue;
+			}
+			const PxReal vn = (dyn->getLinearVelocity() + dyn->getAngularVelocity().cross(r)).dot(n);
+			const PxReal target = MIN(MAX(amount - SLOP, 0.0f) * BAUMGARTE / (PxReal)p_step, MAX_SEPARATION_SPEED);
+			if (vn >= target) {
+				continue;
+			}
+			const PxReal jn = (target - vn) / k;
+			PxVec3 total = n * jn;
+
+			// Friction: cancel the contact's sliding velocity (as it will be
+			// after the push), at most mu * jn.
+			PxReal mu = (PxReal)(real_t)body->get_param(PhysicsServer3D::BODY_PARAM_FRICTION);
+			PxMaterial *other_material = nullptr;
+			if (rh.block.shape && rh.block.shape->getNbMaterials() > 0) {
+				rh.block.shape->getMaterials(&other_material, 1);
+			}
+			mu = other_material ? PxSqrt(MAX(mu, 0.0f) * MAX(other_material->getDynamicFriction(), 0.0f)) : MAX(mu, 0.0f);
+			const PxVec3 v_after = dyn->getLinearVelocity() + dl * jn + (dyn->getAngularVelocity() + da * jn).cross(r);
+			PxVec3 vt = v_after - n * v_after.dot(n);
+			const PxReal vt_len = vt.magnitude();
+			if (mu > 0.0f && vt_len > 1e-4f) {
+				const PxVec3 t = vt / vt_len;
+				PxVec3 tl, ta;
+				PxRigidBodyExt::computeVelocityDeltaFromImpulse(*dyn, t, r.cross(t), tl, ta);
+				const PxReal kt = tl.dot(t) + ta.cross(r).dot(t);
+				if (kt > 0.0f) {
+					total -= t * MIN(vt_len / kt, mu * jn);
+				}
+			}
+
+			PxRigidBodyExt::addForceAtPos(*dyn, total, contact, PxForceMode::eIMPULSE, false);
+			if (PxRigidDynamic *other = rh.block.actor ? rh.block.actor->is<PxRigidDynamic>() : nullptr) {
+				if (!(other->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC)) {
+					PxRigidBodyExt::addForceAtPos(*other, -total, contact, PxForceMode::eIMPULSE, true);
+				}
+			}
+		}
+	}
 }

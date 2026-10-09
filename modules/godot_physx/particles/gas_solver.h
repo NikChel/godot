@@ -45,7 +45,7 @@ class RenderingDevice;
 // diffused in place across steps -- rather than rebuilt from particles every
 // substep. v1 scope (see gas_block_inc.glsl header): the box's lateral (X/Z)
 // footprint is fixed at configure() -- only its height grows automatically
-// (see _grow_if_needed), up to 3x the configured height -- no pressure
+// (see _grow_if_needed), up to 3x the configured height -- Jacobi pressure
 // projection, up to MAX_COLLIDERS sphere colliders.
 //
 // Owns a private local RenderingDevice and runs fully synchronously (submit +
@@ -64,8 +64,8 @@ public:
 		// Extra curl-noise perturbation velocity (m/s) added only to the
 		// backtrace sample, not the real solved field -- fakes fine "billowing
 		// cauliflower" turbulent detail a coarse real-time grid can't resolve
-		// on its own. 0 = off (matches pre-turbulence behaviour exactly).
-		// scale is the base octave's spatial frequency (1/metres); higher =
+		// on its own. 0 = off (matches pre-turbulence behavior exactly).
+		// scale is the base octave's spatial frequency (1/meters); higher =
 		// finer wrinkles. See gas_block_inc.glsl's turbulence_velocity().
 		float turbulence_strength = 0.0f;
 		float turbulence_scale = 2.5f;
@@ -86,7 +86,7 @@ public:
 		float density = 1.0f;
 		// Outward-radial speed from world_position, added on top of velocity --
 		// an explosion/burst emitter (a "nuke plume" base) wants every cell
-		// pushed away from centre, not all pushed the same direction.
+		// pushed away from center, not all pushed the same direction.
 		float divergence = 0.0f;
 		// Tangential speed around world +Y through world_position -- directly
 		// authors rotation (vorticity confinement alone only amplifies
@@ -151,7 +151,7 @@ public:
 		COLLIDER_PLANE = 2 };
 	struct Collider {
 		ColliderShape shape = COLLIDER_SPHERE;
-		Vector3 position; // world; sphere/box: centre | plane: any point on it
+		Vector3 position; // world; sphere/box: center | plane: any point on it
 		Vector3 extents; // sphere: x=radius | box: half-extents | plane: unit outward normal
 	};
 
