@@ -876,7 +876,7 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 				}
 				continue;
 			}
-			if (!sr || !sr->shape || !sr->shape->is_valid()) {
+			if (!sr || sr->disabled || !sr->shape || !sr->shape->is_valid()) {
 				continue;
 			}
 			const GodotPhysXShape3D::ScaledGeometry sg = sr->shape->scaled_geometry(motion_scale * sr->xform.basis.get_scale());
@@ -972,7 +972,7 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 					}
 					continue;
 				}
-				if (!sr || !sr->shape || !sr->shape->is_valid()) {
+				if (!sr || sr->disabled || !sr->shape || !sr->shape->is_valid()) {
 					continue;
 				}
 				const GodotPhysXShape3D::ScaledGeometry sg = sr->shape->scaled_geometry(motion_scale * sr->xform.basis.get_scale());
