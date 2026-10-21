@@ -16,7 +16,8 @@ class Node3D;
 // клип модели (стойка / шаг, гистерезис WALK_ON / WALK_OFF, темп — как AvatarAnimator игрока) и шагает
 // AnimationPlayer (режим MANUAL) накопленным временем: NEAR — каждый кадр, MID — раз в MID_EVERY, FAR — раз
 // в FAR_EVERY кадров (кадры шага раскиданы по ручкам). Поза — каждый кадр у всех. Пишет только аватары,
-// состояние тика не читает и не пишет (AGENTS §2.2). Клипы — библиотека «walker» аватара (stay, beg).
+// состояние тика не читает и не пишет (AGENTS §2.2). Клипы — библиотека «walker» аватара (stay, beg; разовые —
+// view_play_action: играет до конца со скоростью 1, затем снова стойка / шаг).
 class EnemyViews : public RefCounted {
 	GDCLASS(EnemyViews, RefCounted);
 
@@ -31,6 +32,7 @@ public:
 	enum Clip {
 		CLIP_STAND,
 		CLIP_WALK,
+		CLIP_NONE = 255, // после разового клипа — выбрать заново
 	};
 
 	static constexpr real_t NEAR_R = 8.0f;
@@ -41,6 +43,7 @@ public:
 	static constexpr real_t WALK_ON = 0.4f; // м/с
 	static constexpr real_t WALK_OFF = 0.2f;
 	static constexpr real_t CLIP_BLEND = 0.2f; // с
+	static constexpr real_t ACTION_BLEND = 0.1f; // с
 	// Темп шага — как AvatarAnimator игрока (blend_speed, run_speed, run_rate, max_rate)
 	static constexpr real_t BLEND_SPEED = 0.5f;
 	static constexpr real_t RUN_SPEED = 4.5f;
@@ -60,6 +63,8 @@ private:
 	LocalVector<uint8_t> clip;
 	LocalVector<uint8_t> used;
 	LocalVector<uint8_t> has_pose;
+	LocalVector<uint8_t> acting;
+	LocalVector<StringName> action;
 	LocalVector<int> free_handles;
 	uint64_t frame_no = 0;
 	int tier_override = -1;
@@ -79,6 +84,8 @@ public:
 	void view_remove(int p_h);
 	void view_commit(int p_h, const Transform3D &p_pose, real_t p_step_lag, real_t p_speed);
 	void view_set_active(int p_h, bool p_active);
+	void view_play_action(int p_h, const StringName &p_clip);
+	bool view_is_acting(int p_h) const;
 	void frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta);
 
 	int view_tier(int p_h) const;

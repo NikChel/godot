@@ -57,6 +57,8 @@ int EnemyViews::view_add(Node3D *p_root, AnimationPlayer *p_player) {
 		clip.resize(n);
 		used.resize(n);
 		has_pose.resize(n);
+		acting.resize(n);
+		action.resize(n);
 	}
 	root_id[h] = p_root->get_instance_id();
 	player_id[h] = p_player->get_instance_id();
@@ -70,6 +72,8 @@ int EnemyViews::view_add(Node3D *p_root, AnimationPlayer *p_player) {
 	clip[h] = CLIP_STAND;
 	used[h] = 1;
 	has_pose[h] = 0;
+	acting[h] = 0;
+	action[h] = StringName();
 	p_player->set_callback_mode_process(AnimationMixer::ANIMATION_CALLBACK_MODE_PROCESS_MANUAL);
 	p_player->play(_clip_name(CLIP_STAND));
 	p_player->advance(0.0); // первый шаг после play идёт с нулевым временем (AnimationPlayer::_process_playback_data, p_started)
@@ -108,6 +112,22 @@ void EnemyViews::view_set_active(int p_h, bool p_active) {
 	anim_dt[p_h] = 0.0f;
 }
 
+void EnemyViews::view_play_action(int p_h, const StringName &p_clip) {
+	ERR_FAIL_COND(!_valid(p_h));
+	AnimationPlayer *player = ObjectDB::get_instance<AnimationPlayer>(player_id[p_h]);
+	ERR_FAIL_NULL(player);
+	ERR_FAIL_COND_MSG(!player->has_animation(p_clip), vformat("EnemyViews: no clip %s.", p_clip));
+	player->play(p_clip, ACTION_BLEND);
+	player->set_speed_scale(1.0f);
+	acting[p_h] = 1;
+	action[p_h] = p_clip;
+}
+
+bool EnemyViews::view_is_acting(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	return acting[p_h] != 0;
+}
+
 void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) {
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
 	frame_no++;
@@ -137,6 +157,15 @@ void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) 
 		const uint64_t every = (uint64_t)(t == TIER_NEAR ? 1 : (t == TIER_MID ? MID_EVERY : FAR_EVERY));
 		if ((frame_no + i) % every != 0) {
 			continue;
+		}
+		if (acting[i]) {
+			if (player->is_playing() && player->get_current_animation() == action[i]) {
+				player->advance(anim_dt[i]);
+				anim_dt[i] = 0.0f;
+				continue;
+			}
+			acting[i] = 0;
+			clip[i] = CLIP_NONE;
 		}
 		const real_t s = Math::abs(speed[i]);
 		const int c = s > (clip[i] == CLIP_WALK ? WALK_OFF : WALK_ON) ? CLIP_WALK : CLIP_STAND;
@@ -184,6 +213,8 @@ void EnemyViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("view_remove", "handle"), &EnemyViews::view_remove);
 	ClassDB::bind_method(D_METHOD("view_commit", "handle", "pose", "step_lag", "speed"), &EnemyViews::view_commit);
 	ClassDB::bind_method(D_METHOD("view_set_active", "handle", "active"), &EnemyViews::view_set_active);
+	ClassDB::bind_method(D_METHOD("view_play_action", "handle", "clip"), &EnemyViews::view_play_action);
+	ClassDB::bind_method(D_METHOD("view_is_acting", "handle"), &EnemyViews::view_is_acting);
 	ClassDB::bind_method(D_METHOD("frame", "alpha", "camera", "delta"), &EnemyViews::frame);
 	ClassDB::bind_method(D_METHOD("view_tier", "handle"), &EnemyViews::view_tier);
 	ClassDB::bind_method(D_METHOD("view_clip", "handle"), &EnemyViews::view_clip);
@@ -198,4 +229,5 @@ void EnemyViews::_bind_methods() {
 	BIND_ENUM_CONSTANT(TIER_OFF);
 	BIND_ENUM_CONSTANT(CLIP_STAND);
 	BIND_ENUM_CONSTANT(CLIP_WALK);
+	BIND_ENUM_CONSTANT(CLIP_NONE);
 }
