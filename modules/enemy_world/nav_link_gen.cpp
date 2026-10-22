@@ -38,6 +38,7 @@ void EnemyLinkGen::prepare(const Ref<NavigationMesh> &p_full, const Ref<Navigati
 	links.clear();
 	queue.clear();
 	cursor = 0;
+	scan_k = 0;
 	done = false;
 	samples = 0;
 	candidates = 0;
@@ -257,6 +258,7 @@ void EnemyLinkGen::start(RID p_map, int p_walk_layers) {
 	for (const Profile &p : profiles) {
 		can_jump = can_jump || p.reach(0.0f) > 0.0f;
 	}
+	scan_n = (int)((can_jump ? SCAN_MAX : NEAR_D + SNAP_H) / SCAN_STEP);
 	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
 	if (!capsule.is_valid()) {
 		capsule = ps->capsule_shape_create();
@@ -281,12 +283,20 @@ bool EnemyLinkGen::step(Object *p_space, const Transform3D &p_root, int p_budget
 	root_inv = p_root.affine_inverse();
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
 	while (true) {
-		if (cursor >= queue.size() && !_expand_narrow()) {
-			done = true;
-			break;
+		if (scan_k == 0) {
+			if (cursor >= queue.size() && !_expand_narrow()) {
+				done = true;
+				break;
+			}
+			levels.clear();
+			scan_k = 1;
 		}
-		_scan_point(queue[cursor]);
-		cursor++;
+		_scan_step(queue[cursor], scan_k);
+		scan_k++;
+		if (scan_k > scan_n) {
+			scan_k = 0;
+			cursor++;
+		}
 		if (OS::get_singleton()->get_ticks_usec() - t0 >= (uint64_t)p_budget_usec) {
 			break;
 		}
@@ -326,58 +336,54 @@ bool EnemyLinkGen::_expand_narrow() {
 	return cursor < queue.size();
 }
 
-// Точка края: на каждый уровень приземления — ближний кандидат, прошедший все проверки (уровень занимает и «рядом
-// пешком»: дальше на нём — тоже пешком; задетый телом — нет: дальше может пройти).
-void EnemyLinkGen::_scan_point(const Sample &p_s) {
-	levels.clear();
-	const real_t scan_max = can_jump ? SCAN_MAX : NEAR_D + SNAP_H;
-	const int scan_n = (int)(scan_max / SCAN_STEP);
-	for (int k = 1; k <= scan_n; k++) {
-		Vector3 hit;
-		if (!_ground(p_s.p + p_s.n * (k * SCAN_STEP), p_s.p.y, hit)) {
-			continue;
-		}
-		Vector3 land;
-		int poly = -1;
-		if (!index.snap(hit, SNAP_V, SNAP_H, land, poly) || _level_taken(land.y)) {
-			continue;
-		}
-		const real_t dh = land.y - p_s.p.y;
-		const real_t dist = Vector2(land.x - p_s.p.x, land.z - p_s.p.z).length();
-		const int kind = _kind(dh, dist);
-		if (kind < 0) {
-			continue;
-		}
-		const bool end_narrow = poly >= main_polys;
-		const uint32_t lay = _layers(kind, dh, dist, p_s.narrow || end_narrow);
-		if (lay == 0) {
-			continue;
-		}
-		candidates++;
-		_trajectory(kind, p_s.p, land, _strongest(lay), traj);
-		if (!_clear(traj)) {
-			blocked++;
-			continue;
-		}
-		levels.push_back(land.y);
-		if (_walkable(p_s.p, land)) {
-			shortcuts++;
-			continue;
-		}
-		if (_repeat(kind, p_s.p, land)) {
-			continue;
-		}
-		Link l;
-		l.kind = (Kind)kind;
-		l.start = p_s.p;
-		l.end = land;
-		l.layers = lay;
-		l.start_narrow = p_s.narrow;
-		l.traj = traj;
-		links.push_back(l);
-		if (end_narrow) {
-			comp_reached[comp[poly - main_polys]] = 1;
-		}
+// Шаг k вперёд от точки края: на каждый уровень приземления — ближний кандидат, прошедший все проверки (уровень
+// занимает и «рядом пешком»: дальше на нём — тоже пешком; задетый телом — нет: дальше может пройти). Уровни точки —
+// levels (сброс в step в начале точки).
+void EnemyLinkGen::_scan_step(const Sample &p_s, int p_k) {
+	Vector3 hit;
+	if (!_ground(p_s.p + p_s.n * (p_k * SCAN_STEP), p_s.p.y, hit)) {
+		return;
+	}
+	Vector3 land;
+	int poly = -1;
+	if (!index.snap(hit, SNAP_V, SNAP_H, land, poly) || _level_taken(land.y)) {
+		return;
+	}
+	const real_t dh = land.y - p_s.p.y;
+	const real_t dist = Vector2(land.x - p_s.p.x, land.z - p_s.p.z).length();
+	const int kind = _kind(dh, dist);
+	if (kind < 0) {
+		return;
+	}
+	const bool end_narrow = poly >= main_polys;
+	const uint32_t lay = _layers(kind, dh, dist, p_s.narrow || end_narrow);
+	if (lay == 0) {
+		return;
+	}
+	candidates++;
+	_trajectory(kind, p_s.p, land, _strongest(lay), traj);
+	if (!_clear(traj)) {
+		blocked++;
+		return;
+	}
+	levels.push_back(land.y);
+	if (_walkable(p_s.p, land)) {
+		shortcuts++;
+		return;
+	}
+	if (_repeat(kind, p_s.p, land)) {
+		return;
+	}
+	Link l;
+	l.kind = (Kind)kind;
+	l.start = p_s.p;
+	l.end = land;
+	l.layers = lay;
+	l.start_narrow = p_s.narrow;
+	l.traj = traj;
+	links.push_back(l);
+	if (end_narrow) {
+		comp_reached[comp[poly - main_polys]] = 1;
 	}
 }
 

@@ -65,7 +65,7 @@ public:
 	void add_profile(int p_layer_bit, real_t p_max_drop, real_t p_jump_impulse, real_t p_jump_speed, real_t p_gravity, real_t p_climb, bool p_narrow);
 	// После prepare и профилей, регионы в карте: walk_layers — слои регионов для пешего пути (связей в карте ещё нет).
 	void start(RID p_map, int p_walk_layers);
-	// Кусок генерации не дольше бюджета (по точкам края); true — готово.
+	// Кусок генерации не дольше бюджета (по шагам вперёд от точки края); true — готово.
 	bool step(Object *p_space, const Transform3D &p_root, int p_budget_usec);
 
 	int get_link_count() const { return (int)links.size(); }
@@ -156,6 +156,8 @@ private:
 	LocalVector<uint8_t> comp_scanned;
 	LocalVector<Sample> queue; // Точки краёв: основная, затем достижимые узкие куски
 	uint32_t cursor = 0;
+	int scan_k = 0; // Шаг вперёд текущей точки края (0 — точка не начата): бюджет — по шагам, точка продолжается в следующем step
+	int scan_n = 0; // Шагов вперёд на точку (start)
 	bool done = false;
 
 	LocalVector<Profile> profiles;
@@ -195,7 +197,7 @@ private:
 	void _add_samples(const Ref<NavigationMesh> &p_mesh, bool p_narrow, const LocalVector<uint8_t> *p_only);
 	void _add_edge(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_center, bool p_narrow);
 	bool _expand_narrow();
-	void _scan_point(const Sample &p_s);
+	void _scan_step(const Sample &p_s, int p_k);
 	bool _level_taken(real_t p_y) const;
 	bool _ground(const Vector3 &p_q, real_t p_base_y, Vector3 &r_hit) const;
 	uint32_t _layers(int p_kind, real_t p_dh, real_t p_dist, bool p_touches_narrow) const;
