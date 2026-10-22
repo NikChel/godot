@@ -4,6 +4,7 @@
 #include "enemy_replicas.h"
 #include "enemy_views.h"
 #include "enemy_world.h"
+#include "nav_link_gen.h"
 
 #include "core/object/class_db.h"
 
@@ -13,6 +14,7 @@ void initialize_enemy_world_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(EnemyViews);
 		GDREGISTER_CLASS(EnemyBodies);
 		GDREGISTER_CLASS(EnemyReplicas);
+		GDREGISTER_CLASS(EnemyLinkGen);
 	}
 }
 
