@@ -291,7 +291,12 @@ void NavMeshQueries3D::_query_task_search_polygon_connections(NavMeshPathQueryTa
 	real_t poly_travel_cost = p_least_cost_poly.poly->owner->get_travel_cost();
 
 	Vector3 new_entry = Geometry3D::get_closest_point_to_segment(p_least_cost_poly.entry, p_connection.pathway_start, p_connection.pathway_end);
-	real_t new_traveled_distance = p_least_cost_poly.entry.distance_to(new_entry) * poly_travel_cost + p_poly_enter_cost + p_least_cost_poly.traveled_distance;
+	// NikChel: the enter cost belongs to the step that enters another owner (region -> link, link -> region),
+	// paid with the entered owner's cost. Upstream adds the previously popped polygon's owner cost to every
+	// expansion after an owner change between heap pops (p_poly_enter_cost), so link costs land on unrelated
+	// region polygons and links themselves are entered for free.
+	const real_t enter_cost = connection_owner != p_least_cost_poly.poly->owner ? connection_owner->get_enter_cost() : 0.0f;
+	real_t new_traveled_distance = p_least_cost_poly.entry.distance_to(new_entry) * poly_travel_cost + enter_cost + p_least_cost_poly.traveled_distance;
 
 	// Check if the neighbor polygon has already been processed.
 	NavigationPoly &neighbor_poly = navigation_polys[p_query_task.path_query_slot->poly_to_id[p_connection.polygon]];
