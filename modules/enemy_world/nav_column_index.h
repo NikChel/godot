@@ -25,6 +25,10 @@ public:
 	bool is_empty() const { return polys.is_empty(); }
 	// Точка сетки по вертикали через p_point; p_hint — полигон прошлого ответа или -1.
 	bool find(const Vector3 &p_point, real_t p_half_h, int p_hint, Vector3 &r_point, int &r_poly) const;
+	// Точка сетки по вертикали через p_point (полигон накрывает точку по XZ, высота ±p_half_h; из нескольких — ближайший
+	// по высоте); не накрыта — ближайшая по XZ точка края не дальше p_max_xz (высота края ±p_half_h); p_max_xz 0 —
+	// только накрытие. Без подсказки и без запаса клеток 3 × 3 (find): для генератора связей и отбора узких мест.
+	bool snap(const Vector3 &p_point, real_t p_half_h, real_t p_max_xz, Vector3 &r_point, int &r_poly) const;
 
 private:
 	struct Poly {

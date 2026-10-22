@@ -160,3 +160,64 @@ bool NavColumnIndex::nearest_edge(const Vector3 &p_point, real_t p_half_h, const
 	}
 	return r_poly >= 0;
 }
+
+bool NavColumnIndex::snap(const Vector3 &p_point, real_t p_half_h, real_t p_max_xz, Vector3 &r_point, int &r_poly) const {
+	r_poly = -1;
+	const LocalVector<uint32_t> *list = cells.getptr(cell_of(p_point.x, p_point.z));
+	if (list) {
+		real_t best_dy = p_half_h;
+		for (const uint32_t i : *list) {
+			const Poly &pg = polys[i];
+			if (!covers(pg, p_point.x, p_point.z)) {
+				continue;
+			}
+			const real_t y = height(pg, p_point.x, p_point.z);
+			const real_t dy = Math::abs(y - p_point.y);
+			if (dy <= best_dy) {
+				best_dy = dy;
+				r_poly = (int)i;
+				r_point = Vector3(p_point.x, y, p_point.z);
+			}
+		}
+		if (r_poly >= 0) {
+			return true;
+		}
+	}
+	if (p_max_xz <= 0.0f) {
+		return false;
+	}
+	const Vector2 q(p_point.x, p_point.z);
+	real_t best_d2 = p_max_xz * p_max_xz;
+	const Vector2i lo = cell_of(p_point.x - p_max_xz, p_point.z - p_max_xz);
+	const Vector2i hi = cell_of(p_point.x + p_max_xz, p_point.z + p_max_xz);
+	for (int cx = lo.x; cx <= hi.x; cx++) {
+		for (int cz = lo.y; cz <= hi.y; cz++) {
+			const LocalVector<uint32_t> *bucket = cells.getptr(Vector2i(cx, cz));
+			if (!bucket) {
+				continue;
+			}
+			for (const uint32_t i : *bucket) {
+				const Poly &pg = polys[i];
+				if (q.x < pg.min_x - p_max_xz || q.x > pg.max_x + p_max_xz || q.y < pg.min_z - p_max_xz || q.y > pg.max_z + p_max_xz) {
+					continue;
+				}
+				const Vector3 *a = &verts[corners[pg.first + pg.count - 1]];
+				for (uint32_t k = 0; k < pg.count; k++) {
+					const Vector3 &b = verts[corners[pg.first + k]];
+					const Vector2 e = Geometry2D::get_closest_point_to_segment(q, Vector2(a->x, a->z), Vector2(b.x, b.z));
+					const real_t d2 = e.distance_squared_to(q);
+					if (d2 <= best_d2) {
+						const real_t y = height(pg, e.x, e.y);
+						if (Math::abs(y - p_point.y) <= p_half_h) {
+							best_d2 = d2;
+							r_poly = (int)i;
+							r_point = Vector3(e.x, y, e.y);
+						}
+					}
+					a = &b;
+				}
+			}
+		}
+	}
+	return r_poly >= 0;
+}
