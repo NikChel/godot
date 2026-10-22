@@ -436,23 +436,36 @@ Vector3 EnemyWorld::_keep_right(const Vector3 &p_pos, const Vector3 &p_dir) cons
 	return out;
 }
 
-// Стояние (HOLD): вход — конец пути или очередь (_queued); выход — конец пути (новый путь за ушедшей целью) ушёл
-// дальше TARGET_MOVED от конца на входе или свободно HOLD_LEAVE_S подряд. У недостижимой цели конец пути — ближайшая
-// к ней точка сетки: цель ходит по недоступному месту — кольцо стоит, пока эта точка рядом. true — стоим в этом тике.
+// Стояние (HOLD), два повода. У конца пути (p_at_end): стоим, пока конец (новый путь за ушедшей целью) не ушёл
+// дальше TARGET_MOVED — у недостижимой цели конец пути — ближайшая к ней точка сетки, цель ходит по недоступному
+// месту — передние стоят, пока эта точка рядом. В очереди (_queued): стоим, пока впереди стоят; свободно
+// HOLD_LEAVE_S подряд — идём. true — стоим в этом тике.
 bool EnemyWorld::_hold_tick(Follow &r_f, const Input &p_in, const Vector3 &p_dir, bool p_at_end, real_t p_dt) const {
-	const bool blocked = p_at_end || _queued(r_f, p_in, p_dir);
-	if (r_f.state != AGENT_HOLD) {
-		if (blocked) {
-			r_f.hold_end = r_f.path[r_f.path.size() - 1];
+	const Vector3 &end = r_f.path[r_f.path.size() - 1];
+	const bool holding = r_f.state == AGENT_HOLD;
+	if (holding && r_f.hold_by_end && end.distance_to(r_f.hold_end) <= TARGET_MOVED) {
+		r_f.hold_free_t = 0.0f;
+		return true;
+	}
+	if (p_at_end) {
+		if (!holding) {
+			r_f.yielding = false;
+		}
+		r_f.hold_by_end = true;
+		r_f.hold_end = end;
+		r_f.hold_free_t = 0.0f;
+		return true;
+	}
+	r_f.hold_by_end = false;
+	const bool queued = _queued(r_f, p_in, p_dir);
+	if (!holding) {
+		if (queued) {
 			r_f.hold_free_t = 0.0f;
 			r_f.yielding = false;
 		}
-		return blocked;
+		return queued;
 	}
-	if (r_f.path[r_f.path.size() - 1].distance_to(r_f.hold_end) > TARGET_MOVED) {
-		return false;
-	}
-	r_f.hold_free_t = blocked ? 0.0f : r_f.hold_free_t + p_dt;
+	r_f.hold_free_t = queued ? 0.0f : r_f.hold_free_t + p_dt;
 	return r_f.hold_free_t < HOLD_LEAVE_S;
 }
 

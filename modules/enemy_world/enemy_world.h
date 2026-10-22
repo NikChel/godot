@@ -85,7 +85,8 @@ private:
 		real_t conflict_t = 0.0f;
 		real_t clear_t = 0.0f;
 		real_t yield_t = 0.0f;
-		Vector3 hold_end; // Конец пути на входе в HOLD
+		Vector3 hold_end; // Конец пути, у которого стоим (hold_by_end)
+		bool hold_by_end = false; // Стоим у конца пути (иначе — в очереди)
 		real_t hold_free_t = 0.0f; // Сколько подряд свободно (выход из HOLD)
 		int hint = -1; // Полигон прошлого ответа индекса
 	};
