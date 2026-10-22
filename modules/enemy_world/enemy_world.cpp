@@ -436,19 +436,20 @@ Vector3 EnemyWorld::_keep_right(const Vector3 &p_pos, const Vector3 &p_dir) cons
 	return out;
 }
 
-// Стояние (HOLD): вход — конец пути или очередь (_queued); выход — цель ушла дальше TARGET_MOVED от цели входа
-// или свободно HOLD_LEAVE_S подряд. true — стоим в этом тике.
+// Стояние (HOLD): вход — конец пути или очередь (_queued); выход — конец пути (новый путь за ушедшей целью) ушёл
+// дальше TARGET_MOVED от конца на входе или свободно HOLD_LEAVE_S подряд. У недостижимой цели конец пути — ближайшая
+// к ней точка сетки: цель ходит по недоступному месту — кольцо стоит, пока эта точка рядом. true — стоим в этом тике.
 bool EnemyWorld::_hold_tick(Follow &r_f, const Input &p_in, const Vector3 &p_dir, bool p_at_end, real_t p_dt) const {
 	const bool blocked = p_at_end || _queued(r_f, p_in, p_dir);
 	if (r_f.state != AGENT_HOLD) {
 		if (blocked) {
-			r_f.hold_goal = p_in.goal;
+			r_f.hold_end = r_f.path[r_f.path.size() - 1];
 			r_f.hold_free_t = 0.0f;
 			r_f.yielding = false;
 		}
 		return blocked;
 	}
-	if (r_f.hold_goal.distance_to(p_in.goal) > TARGET_MOVED) {
+	if (r_f.path[r_f.path.size() - 1].distance_to(r_f.hold_end) > TARGET_MOVED) {
 		return false;
 	}
 	r_f.hold_free_t = blocked ? 0.0f : r_f.hold_free_t + p_dt;
@@ -491,10 +492,14 @@ bool EnemyWorld::_arrived(uint32_t p_j) const {
 	return !o.has_goal || _flat(o.goal - o.pos).length() <= o.stop_dist;
 }
 
-// Стоящих расталкивает только пересечение капсул: дальше OVERLAP_R — ни шага (тишина у цели).
+// Стоящего толкает только идущий сосед ближе OVERLAP_R: пришедшие (стоят, бьют) друг друга не толкают — врозь их
+// держат тела (иначе соседи вплотную толкаются вечно и тело не уходит в покой).
 Vector3 EnemyWorld::_overlap(const Vector3 &p_pos) const {
 	Vector3 out;
 	for (const uint32_t j : nb) {
+		if (_arrived(j)) {
+			continue;
+		}
 		const Vector3 d = _flat(p_pos - start_pos[j]);
 		const real_t l = d.length();
 		if (l < 1e-4f || l >= OVERLAP_R) {

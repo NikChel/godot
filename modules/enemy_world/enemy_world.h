@@ -55,7 +55,7 @@ public:
 	static constexpr real_t HOLD_QUEUE_REMAIN = 6.0f; // Очередь — только у конца пути, не в проходах
 	static constexpr real_t HOLD_SAME_GOAL = 0.75f; // Сосед ждёт ту же цель — цели ближе
 	static constexpr real_t HOLD_LEAVE_S = 0.3f; // Свободно столько подряд — идём
-	static constexpr real_t OVERLAP_R = 0.7f; // Стоящих расталкивает только пересечение капсул (2 x радиус ходока)
+	static constexpr real_t OVERLAP_R = 0.7f; // Стоящего толкает только идущий сосед ближе этого (пришедших врозь держат тела)
 	static constexpr real_t YIELD_MIN_REMAIN = 3.0f; // Ближе к концу пути не уступаем: встречные там — толпа к одной цели
 	// Удержание на сетке (EnemyWalker._onto_mesh)
 	static constexpr real_t OFF_MESH_DIRECT = 1.5f;
@@ -85,7 +85,7 @@ private:
 		real_t conflict_t = 0.0f;
 		real_t clear_t = 0.0f;
 		real_t yield_t = 0.0f;
-		Vector3 hold_goal; // Цель на входе в HOLD
+		Vector3 hold_end; // Конец пути на входе в HOLD
 		real_t hold_free_t = 0.0f; // Сколько подряд свободно (выход из HOLD)
 		int hint = -1; // Полигон прошлого ответа индекса
 	};
