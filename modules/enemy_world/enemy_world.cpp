@@ -39,6 +39,8 @@ void EnemyWorld::_grow(uint32_t p_size) {
 	prev_heading.resize(p_size);
 	prev_rank.resize(p_size);
 	prev_yield.resize(p_size);
+	start_in.resize(p_size);
+	prev_state.resize(p_size);
 }
 
 const EnemyWorld::Input &EnemyWorld::_start(uint32_t p_h, uint64_t p_now) const {
@@ -101,6 +103,7 @@ int EnemyWorld::agent_add(const Vector3 &p_local_pos) {
 	prev_heading[h] = Vector3();
 	prev_rank[h] = prio[h];
 	prev_yield[h] = 0;
+	prev_state[h] = AGENT_IDLE;
 	return (int)h;
 }
 
@@ -207,10 +210,13 @@ void EnemyWorld::_step() {
 		if (!alive[h]) {
 			continue;
 		}
-		start_pos[h] = _start(h, now).pos;
+		const Input &in = _start(h, now);
+		start_in[h] = in;
+		start_pos[h] = in.pos;
 		prev_heading[h] = out_heading[h];
 		prev_rank[h] = out_rank[h];
 		prev_yield[h] = out_yield[h];
+		prev_state[h] = out_state[h];
 	}
 	for (uint32_t h = 0; h < n; h++) {
 		if (alive[h]) {
@@ -331,6 +337,13 @@ void EnemyWorld::_yield_tick(uint32_t p_h, Follow &r_f, const Vector3 &p_pos, re
 		}
 	}
 	out_rank[p_h] = rank;
+	// У конца пути встречные — толпа, сходящаяся к одной цели, а не конфликт в проходе: не уступаем
+	if (r_f.has_path && _remaining(r_f, p_pos) <= YIELD_MIN_REMAIN) {
+		r_f.yielding = false;
+		r_f.conflict_t = 0.0f;
+		out_yield[p_h] = 0;
+		return;
+	}
 	if (r_f.yielding) {
 		r_f.yield_t += p_dt;
 		r_f.clear_t = (oncoming || leader_yields) ? 0.0f : r_f.clear_t + p_dt;
@@ -356,26 +369,28 @@ Vector3 EnemyWorld::_follow_tick(uint32_t p_h, Follow &r_f, const Input &p_in, r
 	if (r_f.state == AGENT_BLOCKED) {
 		r_f.blocked_t += p_dt;
 	}
-	const Vector3 sep = _separation(pos);
 	if (_flat(p_in.goal - pos).length() <= p_in.stop_dist || r_f.state == AGENT_BLOCKED || !r_f.has_path) {
 		out_heading[p_h] = Vector3();
 		if (r_f.state != AGENT_BLOCKED) {
 			r_f.state = AGENT_IDLE;
 		}
 		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
-		return sep;
+		return _separation(pos);
 	}
 	_advance(r_f, pos);
 	const uint32_t n = r_f.path.size();
 	const Vector3 corner = r_f.path[r_f.corner];
-	if ((uint32_t)r_f.corner == n - 1 && _flat(corner - pos).length() <= CORNER_REACH) {
-		out_heading[p_h] = Vector3(); // Конец пути (цель вне сетки) — дальше не пройти
-		r_f.state = AGENT_IDLE;
-		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
-		return sep;
-	}
 	const Vector3 dir = _flat(corner - pos).normalized();
+	// Конец пути (цель вне сетки) — дальше не пройти: стоим, как и в очереди за стоящим соседом
+	const bool at_end = (uint32_t)r_f.corner == n - 1 && _flat(corner - pos).length() <= CORNER_REACH;
+	if (_hold_tick(r_f, p_in, dir, at_end, p_dt)) {
+		out_heading[p_h] = Vector3();
+		r_f.state = AGENT_HOLD;
+		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
+		return _overlap(pos);
+	}
 	out_heading[p_h] = dir;
+	const Vector3 sep = _separation(pos);
 	if (r_f.yielding) {
 		r_f.state = AGENT_YIELD;
 		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
@@ -421,6 +436,75 @@ Vector3 EnemyWorld::_keep_right(const Vector3 &p_pos, const Vector3 &p_dir) cons
 	return out;
 }
 
+// Стояние (HOLD): вход — конец пути или очередь (_queued); выход — цель ушла дальше TARGET_MOVED от цели входа
+// или свободно HOLD_LEAVE_S подряд. true — стоим в этом тике.
+bool EnemyWorld::_hold_tick(Follow &r_f, const Input &p_in, const Vector3 &p_dir, bool p_at_end, real_t p_dt) const {
+	const bool blocked = p_at_end || _queued(r_f, p_in, p_dir);
+	if (r_f.state != AGENT_HOLD) {
+		if (blocked) {
+			r_f.hold_goal = p_in.goal;
+			r_f.hold_free_t = 0.0f;
+			r_f.yielding = false;
+		}
+		return blocked;
+	}
+	if (r_f.hold_goal.distance_to(p_in.goal) > TARGET_MOVED) {
+		return false;
+	}
+	r_f.hold_free_t = blocked ? 0.0f : r_f.hold_free_t + p_dt;
+	return r_f.hold_free_t < HOLD_LEAVE_S;
+}
+
+// Очередь: у конца пути (≤ HOLD_QUEUE_REMAIN) прямо впереди (ближе HOLD_AHEAD_R, в секторе AHEAD_COS) стоит
+// пришедший сосед (_arrived), который ждёт ту же цель (цели ближе HOLD_SAME_GOAL) или цели не имеет (бьёт).
+bool EnemyWorld::_queued(const Follow &p_f, const Input &p_in, const Vector3 &p_dir) const {
+	if (p_dir.length_squared() < 0.25f || _remaining(p_f, p_in.pos) > HOLD_QUEUE_REMAIN) {
+		return false;
+	}
+	for (const uint32_t j : nb) {
+		if (!_arrived(j)) {
+			continue;
+		}
+		const Vector3 d = _flat(start_pos[j] - p_in.pos);
+		const real_t l = d.length();
+		if (l < 1e-4f || l >= HOLD_AHEAD_R || d.dot(p_dir) / l <= AHEAD_COS) {
+			continue;
+		}
+		const Input &o = start_in[j];
+		if (!o.has_goal || o.goal.distance_to(p_in.goal) <= HOLD_SAME_GOAL) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Сосед пришёл (прошлый расчёт): стоит в HOLD, или IDLE без цели (бьёт, замахивается) или у своей цели. IDLE с
+// целью вдали (ждёт первый путь после спавна) — не пришёл: за ним очередь не встаёт.
+bool EnemyWorld::_arrived(uint32_t p_j) const {
+	if (prev_state[p_j] == AGENT_HOLD) {
+		return true;
+	}
+	if (prev_state[p_j] != AGENT_IDLE) {
+		return false;
+	}
+	const Input &o = start_in[p_j];
+	return !o.has_goal || _flat(o.goal - o.pos).length() <= o.stop_dist;
+}
+
+// Стоящих расталкивает только пересечение капсул: дальше OVERLAP_R — ни шага (тишина у цели).
+Vector3 EnemyWorld::_overlap(const Vector3 &p_pos) const {
+	Vector3 out;
+	for (const uint32_t j : nb) {
+		const Vector3 d = _flat(p_pos - start_pos[j]);
+		const real_t l = d.length();
+		if (l < 1e-4f || l >= OVERLAP_R) {
+			continue;
+		}
+		out += d / l * SEPARATION_GAIN * (1.0f - l / OVERLAP_R);
+	}
+	return out;
+}
+
 void EnemyWorld::_advance(Follow &r_f, const Vector3 &p_pos) const {
 	const int n = (int)r_f.path.size();
 	while (r_f.corner < n - 1) {
@@ -455,6 +539,9 @@ real_t EnemyWorld::_off_path(const Follow &p_f, const Vector3 &p_pos) const {
 bool EnemyWorld::_wants_path(const Follow &p_f, const Input &p_in) const {
 	if (p_f.state == AGENT_BLOCKED) {
 		return p_f.blocked_t >= BLOCKED_REPATH_S;
+	}
+	if (p_f.state == AGENT_HOLD) {
+		return p_f.path_target.distance_to(p_in.goal) > TARGET_MOVED; // Стоим — путь только за ушедшей целью
 	}
 	if (_flat(p_in.goal - p_in.pos).length() <= p_in.stop_dist) {
 		return false;
@@ -546,4 +633,5 @@ void EnemyWorld::_bind_methods() {
 	BIND_ENUM_CONSTANT(AGENT_MOVE);
 	BIND_ENUM_CONSTANT(AGENT_BLOCKED);
 	BIND_ENUM_CONSTANT(AGENT_YIELD);
+	BIND_ENUM_CONSTANT(AGENT_HOLD);
 }

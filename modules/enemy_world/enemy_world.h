@@ -9,7 +9,7 @@
 // docs/superpowers/specs/2026-10-20-enemy-walker-c1-design.md §3, §5): агенты — ручки, состояние — плоские
 // массивы, координаты — корня карты (NavWorld), верх +Y. Этап 1 — толпа: соседи (NEIGHBORS_MAX ближайших в
 // SEPARATION_R), расталкивание, правая рука, уступка (приоритет колонны, YIELD), следование по пути,
-// застревание / BLOCKED, удержание на сетке (NavColumnIndex). Расчёт — один проход на всех агентов за
+// застревание / BLOCKED, стояние у цели (HOLD: конец пути к недостижимой цели, очередь за стоящим соседом), удержание на сетке (NavColumnIndex). Расчёт — один проход на всех агентов за
 // физ-тик, запускает первый запрос выходов в тике; читает входы всех агентов на начало тика (сданные
 // раньше этого тика) и намерения соседей прошлого расчёта, каждый агент пишет только своё — порядок нод
 // и кто спросил первым не влияют (AGENTS §2.5). Новый путь (agent_set_path) — со следующего тика.
@@ -23,6 +23,7 @@ public:
 		AGENT_MOVE,
 		AGENT_BLOCKED,
 		AGENT_YIELD,
+		AGENT_HOLD, // Стоит у цели: конец пути к недостижимой цели или очередь за стоящим соседом с той же целью
 	};
 
 	// Следование (PathFollower)
@@ -49,6 +50,13 @@ public:
 	static constexpr real_t CONFLICT_S = 0.5f;
 	static constexpr real_t CLEAR_S = 1.0f;
 	static constexpr real_t MAX_S = 4.0f;
+	// Стояние (HOLD; план docs/superpowers/plans/2026-10-22-crowd-hold.md)
+	static constexpr real_t HOLD_AHEAD_R = 0.8f; // Стоящий сосед впереди ближе — встаём за ним
+	static constexpr real_t HOLD_QUEUE_REMAIN = 6.0f; // Очередь — только у конца пути, не в проходах
+	static constexpr real_t HOLD_SAME_GOAL = 0.75f; // Сосед ждёт ту же цель — цели ближе
+	static constexpr real_t HOLD_LEAVE_S = 0.3f; // Свободно столько подряд — идём
+	static constexpr real_t OVERLAP_R = 0.7f; // Стоящих расталкивает только пересечение капсул (2 x радиус ходока)
+	static constexpr real_t YIELD_MIN_REMAIN = 3.0f; // Ближе к концу пути не уступаем: встречные там — толпа к одной цели
 	// Удержание на сетке (EnemyWalker._onto_mesh)
 	static constexpr real_t OFF_MESH_DIRECT = 1.5f;
 	static constexpr real_t MESH_EPS = 0.05f;
@@ -77,6 +85,8 @@ private:
 		real_t conflict_t = 0.0f;
 		real_t clear_t = 0.0f;
 		real_t yield_t = 0.0f;
+		Vector3 hold_goal; // Цель на входе в HOLD
+		real_t hold_free_t = 0.0f; // Сколько подряд свободно (выход из HOLD)
 		int hint = -1; // Полигон прошлого ответа индекса
 	};
 
@@ -106,6 +116,8 @@ private:
 	LocalVector<Vector3> prev_heading;
 	LocalVector<int64_t> prev_rank;
 	LocalVector<uint8_t> prev_yield;
+	LocalVector<Input> start_in; // Входы на начало тика (цель, остановка — для очереди)
+	LocalVector<uint8_t> prev_state;
 	LocalVector<uint32_t> free_handles;
 	int64_t next_prio = 0;
 	uint64_t stepped_tick = UINT64_MAX;
@@ -132,6 +144,10 @@ private:
 	Vector3 _follow_tick(uint32_t p_h, Follow &r_f, const Input &p_in, real_t p_dt);
 	Vector3 _separation(const Vector3 &p_pos) const;
 	Vector3 _keep_right(const Vector3 &p_pos, const Vector3 &p_dir) const;
+	bool _hold_tick(Follow &r_f, const Input &p_in, const Vector3 &p_dir, bool p_at_end, real_t p_dt) const;
+	bool _queued(const Follow &p_f, const Input &p_in, const Vector3 &p_dir) const;
+	bool _arrived(uint32_t p_j) const;
+	Vector3 _overlap(const Vector3 &p_pos) const;
 	void _advance(Follow &r_f, const Vector3 &p_pos) const;
 	real_t _remaining(const Follow &p_f, const Vector3 &p_pos) const;
 	real_t _off_path(const Follow &p_f, const Vector3 &p_pos) const;
