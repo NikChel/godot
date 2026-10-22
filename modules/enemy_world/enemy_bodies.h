@@ -22,7 +22,8 @@ class Node3D;
 // удара — замах WINDUP_S, удар, восстановление RECOVER_S; точка пробы — без боя) → желаемая скорость у толпы
 // (EnemyWorld; входы на начало тика) → ярус по расстоянию до ближайшего игрока (NEAR ближе NEAR_R — физика тела:
 // move_and_slide и шаг на ступень; FAR дальше NEAR_R + TIER_HYST — без физики, по сетке навигации; VR и Flat
-// одинаково) → движение и взгляд (yaw вокруг верха системы, не быстрее TURN_RATE) → вход толпе, поза визуалу
+// одинаково) → движение и взгляд (yaw вокруг верха системы, не быстрее TURN_RATE; стоящий в толпе (HOLD) смотрит на цель; стоящий на полу без
+// скорости — покой: без move_and_slide, полный шаг раз в REST_CHECK_TICKS) → вход толпе, поза визуалу
 // (EnemyViews), поза тика для сети (net_pack). Бой и решения — у GDScript: тик возвращает события (пары «вид,
 // ручка»: клип замаха, удар, запрос пути в слот ходока, предметы у ног), их решает проход карты (EnemyPass).
 // Тела — CharacterBody3D (ObjectID; пропавшее тело пропускается). Координаты толпы — корня карты.
@@ -54,6 +55,7 @@ public:
 	static constexpr real_t STRIKE_STOP = 0.9f;
 	static constexpr real_t POINT_STOP = 0.3f;
 	static constexpr real_t REACH = 1.3f;
+	static constexpr real_t REACH_UP = 1.0f; // Цель выше / ниже по верху тела — не достать (стоит на конусе, на ящике)
 	static constexpr real_t SECTOR_DEG = 45.0f;
 	static constexpr real_t WINDUP_S = 0.5f;
 	static constexpr real_t RECOVER_S = 0.7f;
@@ -62,6 +64,9 @@ public:
 	static constexpr real_t TURN_RATE = 8.0f; // рад/с
 	static constexpr real_t STEP_HALFLIFE = 0.05f; // с
 	static constexpr real_t FACE_MOVE_SPEED = 0.2f; // Быстрее — смотрит по ходу
+	// Покой тела (план 2026-10-22-crowd-hold)
+	static constexpr real_t REST_SPEED = 0.05f; // Своя и желаемая скорость ниже — тело в покое
+	static constexpr uint64_t REST_CHECK_TICKS = 9; // Полный шаг покоя раз в столько тиков (~0.1 с, сдвиг по слоту)
 	// Шаг на ступень (StepUp)
 	static constexpr real_t STEP_H = 0.35f;
 	static constexpr real_t MIN_TREAD = 0.005f;
@@ -138,6 +143,7 @@ private:
 	PackedInt32Array events;
 	uint64_t last_tick_usec = 0;
 	int tier_counts[2] = {};
+	int rest_count = 0;
 
 	bool _valid(int p_h) const;
 	void _root_xforms();
@@ -155,6 +161,7 @@ private:
 	static uint64_t _ticks(real_t p_s);
 	// Движение
 	void _update_tier(Body &r_b, const Vector3 &p_pos);
+	static bool _rest(const Body &p_b, CharacterBody3D *p_body, const Vector3 &p_want, uint8_t p_state, uint64_t p_now);
 	void _move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt);
 	Vector3 _move_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt);
 	static void _lag(Body &r_b, real_t p_rise, real_t p_dt);
@@ -208,6 +215,7 @@ public:
 	Array net_pack() const; // [тик, PackedInt32Array net id, PackedFloat32Array по 6 чисел: x, y, z, yaw, speed, step_lag]
 	int get_body_count() const;
 	int get_tier_count(int p_tier) const;
+	int get_rest_count() const { return rest_count; } // Тел в покое за последний тик
 	int64_t get_last_tick_usec() const { return (int64_t)last_tick_usec; }
 };
 

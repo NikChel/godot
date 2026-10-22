@@ -240,6 +240,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	events.clear();
 	tier_counts[TIER_NEAR] = 0;
 	tier_counts[TIER_FAR] = 0;
+	rest_count = 0;
 	_root_xforms();
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
@@ -282,11 +283,16 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	}
 	const Vector3 pos0 = p_body->get_global_position();
 	const Vector3 look = r_b.moving ? r_b.world : r_b.face;
-	const Vector3 face = (r_b.moving && want.length() > FACE_MOVE_SPEED) ? want : look - pos0;
+	const bool hold = st == EnemyWorld::AGENT_HOLD; // Стоит в толпе — лицом к цели, не по толчкам соседей
+	const Vector3 face = (r_b.moving && !hold && want.length() > FACE_MOVE_SPEED) ? want : look - pos0;
 	_update_tier(r_b, pos0);
 	Vector3 vel;
 	if (r_b.tier == TIER_FAR) {
 		vel = _move_far(r_b, p_body, want, face, p_dt);
+	} else if (_rest(r_b, p_body, want, st, p_now)) {
+		rest_count++;
+		_lag(r_b, 0.0f, p_dt);
+		_turn(r_b, p_body, face, r_b.up, p_dt);
 	} else {
 		_move_near(r_b, p_body, want, face, p_dt);
 		vel = p_body->get_real_velocity();
@@ -377,7 +383,11 @@ int EnemyBodies::_pick(const Vector3 &p_pos) const {
 bool EnemyBodies::_in_reach(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const {
 	const Vector3 up = p_b.up;
 	Vector3 d = p_target - p_body->get_global_position();
-	d -= up * d.dot(up);
+	const real_t dh = d.dot(up);
+	if (Math::abs(dh) > REACH_UP) {
+		return false; // Цель выше / ниже досягаемости
+	}
+	d -= up * dh;
 	if (d.length() > REACH) {
 		return false;
 	}
@@ -468,6 +478,19 @@ void EnemyBodies::_update_tier(Body &r_b, const Vector3 &p_pos) {
 	} else if (r_b.tier == TIER_FAR && d < NEAR_R) {
 		r_b.tier = TIER_NEAR;
 	}
+}
+
+// Покой: стоящий (толпа IDLE / HOLD) на полу без своей и желаемой скорости не зовёт move_and_slide — поза та же;
+// раз в REST_CHECK_TICKS (со сдвигом по слоту) — полный шаг: пол на месте, флаги пола свежие. Желаемая скорость
+// (идти, расталкивание при пересечении) — сразу полный расчёт.
+bool EnemyBodies::_rest(const Body &p_b, CharacterBody3D *p_body, const Vector3 &p_want, uint8_t p_state, uint64_t p_now) {
+	if (p_state != EnemyWorld::AGENT_IDLE && p_state != EnemyWorld::AGENT_HOLD) {
+		return false;
+	}
+	if (p_b.on_step || p_want.length() >= REST_SPEED || p_body->get_velocity().length() >= REST_SPEED || !p_body->is_on_floor()) {
+		return false;
+	}
+	return (p_now + (uint64_t)p_b.slot) % REST_CHECK_TICKS != 0;
 }
 
 // WalkerMover.tick: горизонтальная скорость к желаемой с разгоном ACCEL, гравитация вдоль верха тела,
@@ -728,6 +751,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("net_pack"), &EnemyBodies::net_pack);
 	ClassDB::bind_method(D_METHOD("get_body_count"), &EnemyBodies::get_body_count);
 	ClassDB::bind_method(D_METHOD("get_tier_count", "tier"), &EnemyBodies::get_tier_count);
+	ClassDB::bind_method(D_METHOD("get_rest_count"), &EnemyBodies::get_rest_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyBodies::get_last_tick_usec);
 
 	BIND_ENUM_CONSTANT(BRAIN_IDLE);
