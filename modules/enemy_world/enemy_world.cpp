@@ -25,6 +25,9 @@ void EnemyWorld::_grow(uint32_t p_size) {
 	path_new_target.resize(p_size);
 	path_tick.resize(p_size);
 	path_pending.resize(p_size);
+	path_new_links.resize(p_size);
+	airborne.resize(p_size);
+	link_done.resize(p_size);
 	follow.resize(p_size);
 	out_vel.resize(p_size);
 	out_heading.resize(p_size);
@@ -32,6 +35,7 @@ void EnemyWorld::_grow(uint32_t p_size) {
 	out_yield.resize(p_size);
 	out_state.resize(p_size);
 	out_wants.resize(p_size);
+	out_link.resize(p_size);
 	stuck_total.resize(p_size);
 	blocked_total.resize(p_size);
 	yield_total.resize(p_size);
@@ -41,6 +45,7 @@ void EnemyWorld::_grow(uint32_t p_size) {
 	prev_yield.resize(p_size);
 	start_in.resize(p_size);
 	prev_state.resize(p_size);
+	prev_link.resize(p_size);
 }
 
 const EnemyWorld::Input &EnemyWorld::_start(uint32_t p_h, uint64_t p_now) const {
@@ -90,6 +95,11 @@ int EnemyWorld::agent_add(const Vector3 &p_local_pos) {
 	in_tick[h] = UINT64_MAX;
 	path_new[h].clear();
 	path_pending[h] = 0;
+	path_new_links[h].clear();
+	airborne[h] = 0;
+	link_done[h] = 0;
+	out_link[h] = -1;
+	prev_link[h] = -1;
 	follow[h] = Follow();
 	out_vel[h] = Vector3();
 	out_heading[h] = Vector3();
@@ -111,6 +121,8 @@ void EnemyWorld::agent_remove(int p_h) {
 	ERR_FAIL_COND(!_valid(p_h));
 	alive[p_h] = 0;
 	follow[p_h] = Follow();
+	airborne[p_h] = 0;
+	link_done[p_h] = 0;
 	free_handles.push_back((uint32_t)p_h);
 }
 
@@ -129,12 +141,45 @@ void EnemyWorld::agent_commit(int p_h, const Vector3 &p_local_pos, const Vector3
 	in.speed = p_speed;
 }
 
-void EnemyWorld::agent_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target) {
+void EnemyWorld::agent_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links) {
 	ERR_FAIL_COND(!_valid(p_h));
 	path_new[p_h] = p_points;
+	path_new_links[p_h] = p_links;
 	path_new_target[p_h] = p_target;
 	path_tick[p_h] = _now();
 	path_pending[p_h] = 1;
+}
+
+int EnemyWorld::agent_link(int p_h) {
+	ERR_FAIL_COND_V(!_valid(p_h), -1);
+	_ensure_step();
+	return out_link[p_h];
+}
+
+void EnemyWorld::agent_set_airborne(int p_h, bool p_on) {
+	ERR_FAIL_COND(!_valid(p_h));
+	airborne[p_h] = p_on ? 1 : 0;
+}
+
+void EnemyWorld::agent_link_done(int p_h) {
+	ERR_FAIL_COND(!_valid(p_h));
+	link_done[p_h] = 1;
+}
+
+int EnemyWorld::count_near(const Vector3 &p_local, real_t p_r, int p_exclude) {
+	_ensure_step();
+	const real_t r2 = p_r * p_r;
+	int n = 0;
+	for (uint32_t j = 0; j < alive.size(); j++) {
+		if (!alive[j] || airborne[j] || (int)j == p_exclude) {
+			continue;
+		}
+		const Vector3 d = start_pos[j] - p_local;
+		if (Math::abs(d.y) <= NEAR_H && d.x * d.x + d.z * d.z < r2) {
+			n++;
+		}
+	}
+	return n;
 }
 
 Vector3 EnemyWorld::agent_velocity(int p_h) {
@@ -217,6 +262,7 @@ void EnemyWorld::_step() {
 		prev_rank[h] = out_rank[h];
 		prev_yield[h] = out_yield[h];
 		prev_state[h] = out_state[h];
+		prev_link[h] = out_link[h];
 	}
 	for (uint32_t h = 0; h < n; h++) {
 		if (alive[h]) {
@@ -229,6 +275,25 @@ void EnemyWorld::_step() {
 void EnemyWorld::_step_agent(uint32_t p_h, uint64_t p_now, real_t p_dt) {
 	const Input &in = _start(p_h, p_now);
 	Follow &f = follow[p_h];
+	if (airborne[p_h]) { // На связи: ведёт тело (EnemyBodies); путь — после приземления
+		out_vel[p_h] = Vector3();
+		out_heading[p_h] = Vector3();
+		out_state[p_h] = AGENT_LINK;
+		out_wants[p_h] = 0;
+		out_link[p_h] = -1;
+		return;
+	}
+	if (link_done[p_h]) { // Приземлился: путь с конца связи; путь, спрошенный до связи (от её начала), — мимо
+		link_done[p_h] = 0;
+		path_pending[p_h] = 0;
+		if (f.has_path && _corner_link(f) >= 0) {
+			f.corner++;
+		}
+		f.state = AGENT_MOVE;
+		f.hold_by_end = false;
+		f.stuck_t = 0.0f;
+		f.stuck_from = in.pos;
+	}
 	if (path_pending[p_h] && path_tick[p_h] < p_now) {
 		path_pending[p_h] = 0;
 		_adopt_path(p_h, f);
@@ -239,6 +304,7 @@ void EnemyWorld::_step_agent(uint32_t p_h, uint64_t p_now, real_t p_dt) {
 		out_state[p_h] = AGENT_IDLE;
 		out_wants[p_h] = 0;
 		out_rank[p_h] = prio[p_h];
+		out_link[p_h] = -1;
 		return;
 	}
 	_neighbors(p_h, in.pos);
@@ -250,6 +316,7 @@ void EnemyWorld::_step_agent(uint32_t p_h, uint64_t p_now, real_t p_dt) {
 	out_vel[p_h] = w;
 	out_state[p_h] = (uint8_t)f.state;
 	out_wants[p_h] = _wants_path(f, in) ? 1 : 0;
+	out_link[p_h] = f.has_path ? _corner_link(f) : -1;
 }
 
 void EnemyWorld::_adopt_path(uint32_t p_h, Follow &r_f) {
@@ -258,12 +325,18 @@ void EnemyWorld::_adopt_path(uint32_t p_h, Follow &r_f) {
 	for (int i = 0; i < src.size(); i++) {
 		r_f.path[i] = src[i];
 	}
+	const Vector<int> &lk = path_new_links[p_h];
+	r_f.links.resize(r_f.path.size());
+	for (uint32_t i = 0; i < r_f.path.size(); i++) {
+		r_f.links[i] = (int)i < lk.size() ? lk[i] : -1;
+	}
 	r_f.path_target = path_new_target[p_h];
 	r_f.corner = 1;
 	r_f.since_path = 0.0f;
 	r_f.blocked_t = 0.0f;
 	if (r_f.path.size() < 2) {
 		r_f.path.clear();
+		r_f.links.clear();
 		r_f.has_path = false;
 		if (r_f.state != AGENT_BLOCKED) {
 			blocked_total[p_h]++;
@@ -283,7 +356,7 @@ void EnemyWorld::_neighbors(uint32_t p_h, const Vector3 &p_pos) {
 	const real_t r2 = SEPARATION_R * SEPARATION_R;
 	const uint32_t n = alive.size();
 	for (uint32_t j = 0; j < n; j++) {
-		if (j == p_h || !alive[j]) {
+		if (j == p_h || !alive[j] || airborne[j]) {
 			continue;
 		}
 		const real_t dx = start_pos[j].x - p_pos.x;
@@ -381,8 +454,16 @@ Vector3 EnemyWorld::_follow_tick(uint32_t p_h, Follow &r_f, const Input &p_in, r
 	const uint32_t n = r_f.path.size();
 	const Vector3 corner = r_f.path[r_f.corner];
 	const Vector3 dir = _flat(corner - pos).normalized();
+	const int link = _corner_link(r_f);
+	const real_t to_corner = _flat(corner - pos).length();
+	if (link >= 0 && to_corner <= LINK_REACH) { // У входа связи: стоит, связь ведёт тело (EnemyBodies)
+		out_heading[p_h] = Vector3();
+		r_f.state = AGENT_LINK;
+		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
+		return _overlap(pos);
+	}
 	// Конец пути (цель вне сетки) — дальше не пройти: стоим, как и в очереди за стоящим соседом
-	const bool at_end = (uint32_t)r_f.corner == n - 1 && _flat(corner - pos).length() <= CORNER_REACH;
+	const bool at_end = (uint32_t)r_f.corner == n - 1 && to_corner <= CORNER_REACH;
 	if (_hold_tick(r_f, p_in, dir, at_end, p_dt)) {
 		out_heading[p_h] = Vector3();
 		r_f.state = AGENT_HOLD;
@@ -401,6 +482,9 @@ Vector3 EnemyWorld::_follow_tick(uint32_t p_h, Follow &r_f, const Input &p_in, r
 	const bool reaches = !r_f.path.is_empty() && r_f.path[n - 1].distance_to(r_f.path_target) <= REACH_TOL;
 	if (reaches) {
 		s = p_in.speed * CLAMP((_remaining(r_f, pos) - p_in.stop_dist) / SLOW_DIST, 0.0f, 1.0f);
+	}
+	if (link >= 0) { // К началу связи — замедляясь: тело стоит у входа, а не проскакивает к краю
+		s = MIN(s, p_in.speed * CLAMP(to_corner / SLOW_DIST, LINK_SLOW_MIN, 1.0f));
 	}
 	const Vector3 want = dir * s + sep + _keep_right(pos, dir);
 	_track_stuck(p_h, r_f, pos, want.length(), p_dt);
@@ -469,19 +553,30 @@ bool EnemyWorld::_hold_tick(Follow &r_f, const Input &p_in, const Vector3 &p_dir
 	return r_f.hold_free_t < HOLD_LEAVE_S;
 }
 
-// Очередь: у конца пути (≤ HOLD_QUEUE_REMAIN) прямо впереди (ближе HOLD_AHEAD_R, в секторе AHEAD_COS) стоит
-// пришедший сосед (_arrived), который ждёт ту же цель (цели ближе HOLD_SAME_GOAL) или цели не имеет (бьёт).
+// Очередь, два повода. У конца пути (≤ HOLD_QUEUE_REMAIN) прямо впереди (ближе HOLD_AHEAD_R, в секторе AHEAD_COS)
+// стоит пришедший сосед (_arrived), который ждёт ту же цель (цели ближе HOLD_SAME_GOAL) или цели не имеет (бьёт). У
+// связи (угол пути — её начало, до него ≤ HOLD_QUEUE_REMAIN): впереди стоит сосед, ждущий ту же связь (у входа —
+// AGENT_LINK, или уже в очереди к ней — HOLD).
 bool EnemyWorld::_queued(const Follow &p_f, const Input &p_in, const Vector3 &p_dir) const {
-	if (p_dir.length_squared() < 0.25f || _remaining(p_f, p_in.pos) > HOLD_QUEUE_REMAIN) {
+	if (p_dir.length_squared() < 0.25f) {
+		return false;
+	}
+	const int link = _corner_link(p_f);
+	const bool near_link = link >= 0 && _flat(p_f.path[p_f.corner] - p_in.pos).length() <= HOLD_QUEUE_REMAIN;
+	const bool near_end = _remaining(p_f, p_in.pos) <= HOLD_QUEUE_REMAIN;
+	if (!near_link && !near_end) {
 		return false;
 	}
 	for (const uint32_t j : nb) {
-		if (!_arrived(j)) {
-			continue;
-		}
 		const Vector3 d = _flat(start_pos[j] - p_in.pos);
 		const real_t l = d.length();
 		if (l < 1e-4f || l >= HOLD_AHEAD_R || d.dot(p_dir) / l <= AHEAD_COS) {
+			continue;
+		}
+		if (near_link && prev_link[j] == link && (prev_state[j] == AGENT_LINK || prev_state[j] == AGENT_HOLD)) {
+			return true;
+		}
+		if (!near_end || !_arrived(j)) {
 			continue;
 		}
 		const Input &o = start_in[j];
@@ -526,6 +621,9 @@ Vector3 EnemyWorld::_overlap(const Vector3 &p_pos) const {
 void EnemyWorld::_advance(Follow &r_f, const Vector3 &p_pos) const {
 	const int n = (int)r_f.path.size();
 	while (r_f.corner < n - 1) {
+		if (_corner_link(r_f) >= 0) {
+			break; // Начало связи не пропускаем: у него стоят, связь проходит тело
+		}
 		const Vector3 &a = r_f.path[r_f.corner - 1];
 		const Vector3 &b = r_f.path[r_f.corner];
 		const Vector3 ab = _flat(b - a);
@@ -546,6 +644,10 @@ real_t EnemyWorld::_remaining(const Follow &p_f, const Vector3 &p_pos) const {
 	return r;
 }
 
+int EnemyWorld::_corner_link(const Follow &p_f) const {
+	return (uint32_t)p_f.corner < p_f.links.size() ? p_f.links[p_f.corner] : -1;
+}
+
 real_t EnemyWorld::_off_path(const Follow &p_f, const Vector3 &p_pos) const {
 	const Vector3 &a = p_f.path[p_f.corner - 1];
 	const Vector3 &b = p_f.path[p_f.corner];
@@ -560,6 +662,9 @@ bool EnemyWorld::_wants_path(const Follow &p_f, const Input &p_in) const {
 	}
 	if (p_f.state == AGENT_HOLD) {
 		return p_f.path_target.distance_to(p_in.goal) > TARGET_MOVED; // Стоим — путь только за ушедшей целью
+	}
+	if (p_f.state == AGENT_LINK) {
+		return false; // У входа связи путь не меняем (закрытая связь — EnemyBodies спрашивает сам)
 	}
 	if (_flat(p_in.goal - p_in.pos).length() <= p_in.stop_dist) {
 		return false;
@@ -596,6 +701,7 @@ void EnemyWorld::_track_stuck(uint32_t p_h, Follow &r_f, const Vector3 &p_pos, r
 	r_f.stuck_run++;
 	stuck_total[p_h]++;
 	r_f.path.clear(); // Новый путь — в ближайший слот
+	r_f.links.clear();
 	r_f.has_path = false;
 	if (r_f.stuck_run >= STUCK_LIMIT) {
 		r_f.stuck_run = 0;
@@ -634,7 +740,11 @@ void EnemyWorld::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("agent_add", "local_pos"), &EnemyWorld::agent_add);
 	ClassDB::bind_method(D_METHOD("agent_remove", "handle"), &EnemyWorld::agent_remove);
 	ClassDB::bind_method(D_METHOD("agent_commit", "handle", "local_pos", "goal", "has_goal", "stop_dist", "speed"), &EnemyWorld::agent_commit);
-	ClassDB::bind_method(D_METHOD("agent_set_path", "handle", "points", "target"), &EnemyWorld::agent_set_path);
+	ClassDB::bind_method(D_METHOD("agent_set_path", "handle", "points", "target", "links"), &EnemyWorld::agent_set_path, DEFVAL(PackedInt32Array()));
+	ClassDB::bind_method(D_METHOD("agent_link", "handle"), &EnemyWorld::agent_link);
+	ClassDB::bind_method(D_METHOD("agent_set_airborne", "handle", "on"), &EnemyWorld::agent_set_airborne);
+	ClassDB::bind_method(D_METHOD("agent_link_done", "handle"), &EnemyWorld::agent_link_done);
+	ClassDB::bind_method(D_METHOD("count_near", "local", "radius", "exclude"), &EnemyWorld::count_near);
 	ClassDB::bind_method(D_METHOD("agent_velocity", "handle"), &EnemyWorld::agent_velocity);
 	ClassDB::bind_method(D_METHOD("agent_state", "handle"), &EnemyWorld::agent_state);
 	ClassDB::bind_method(D_METHOD("agent_wants_path", "handle"), &EnemyWorld::agent_wants_path);
@@ -652,4 +762,5 @@ void EnemyWorld::_bind_methods() {
 	BIND_ENUM_CONSTANT(AGENT_BLOCKED);
 	BIND_ENUM_CONSTANT(AGENT_YIELD);
 	BIND_ENUM_CONSTANT(AGENT_HOLD);
+	BIND_ENUM_CONSTANT(AGENT_LINK);
 }

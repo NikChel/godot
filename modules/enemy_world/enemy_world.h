@@ -9,7 +9,7 @@
 // docs/superpowers/specs/2026-10-20-enemy-walker-c1-design.md §3, §5): агенты — ручки, состояние — плоские
 // массивы, координаты — корня карты (NavWorld), верх +Y. Этап 1 — толпа: соседи (NEIGHBORS_MAX ближайших в
 // SEPARATION_R), расталкивание, правая рука, уступка (приоритет колонны, YIELD), следование по пути,
-// застревание / BLOCKED, стояние у цели (HOLD: конец пути к недостижимой цели, очередь за стоящим соседом), удержание на сетке (NavColumnIndex). Расчёт — один проход на всех агентов за
+// застревание / BLOCKED, стояние у цели (HOLD: конец пути к недостижимой цели, очередь за стоящим соседом), удержание на сетке (NavColumnIndex), связи пути (стоп у начала, очередь, агент на связи невидим — план 2026-10-22-nav-links-b). Расчёт — один проход на всех агентов за
 // физ-тик, запускает первый запрос выходов в тике; читает входы всех агентов на начало тика (сданные
 // раньше этого тика) и намерения соседей прошлого расчёта, каждый агент пишет только своё — порядок нод
 // и кто спросил первым не влияют (AGENTS §2.5). Новый путь (agent_set_path) — со следующего тика.
@@ -24,6 +24,7 @@ public:
 		AGENT_BLOCKED,
 		AGENT_YIELD,
 		AGENT_HOLD, // Стоит у цели: конец пути к недостижимой цели или очередь за стоящим соседом с той же целью
+		AGENT_LINK, // У начала связи (ждёт; связь ведёт EnemyBodies) или на ней (agent_set_airborne)
 	};
 
 	// Следование (PathFollower)
@@ -57,6 +58,10 @@ public:
 	static constexpr real_t HOLD_LEAVE_S = 0.3f; // Свободно столько подряд — идём
 	static constexpr real_t OVERLAP_R = 0.7f; // Стоящего толкает только идущий сосед ближе этого (пришедших врозь держат тела)
 	static constexpr real_t YIELD_MIN_REMAIN = 3.0f; // Ближе к концу пути не уступаем: встречные там — толпа к одной цели
+	// Связи (план docs/superpowers/plans/2026-10-22-nav-links-b.md)
+	static constexpr real_t LINK_REACH = 0.4f; // Ближе к началу связи — стоит у входа (AGENT_LINK)
+	static constexpr real_t LINK_SLOW_MIN = 0.3f; // Доля скорости у самого входа (подход замедляется на SLOW_DIST)
+	static constexpr real_t NEAR_H = 0.9f; // count_near: по высоте не дальше (этаж выше / ниже — не рядом)
 	// Удержание на сетке (EnemyWalker._onto_mesh)
 	static constexpr real_t OFF_MESH_DIRECT = 1.5f;
 	static constexpr real_t MESH_EPS = 0.05f;
@@ -72,6 +77,7 @@ private:
 	};
 	struct Follow { // Своё состояние агента — пишет только его расчёт
 		LocalVector<Vector3> path;
+		LocalVector<int> links; // Номер связи карты на точку пути (точка — начало связи), -1 — нет
 		Vector3 path_target;
 		bool has_path = false;
 		int corner = 1;
@@ -101,6 +107,9 @@ private:
 	LocalVector<Vector3> path_new_target;
 	LocalVector<uint64_t> path_tick;
 	LocalVector<uint8_t> path_pending;
+	LocalVector<Vector<int>> path_new_links;
+	LocalVector<uint8_t> airborne; // На связи (тело ведёт EnemyBodies): соседи его не видят, расчёта нет
+	LocalVector<uint8_t> link_done; // Связь пройдена — со следующего расчёта путь с конца связи
 	LocalVector<Follow> follow;
 	// Выходы расчёта
 	LocalVector<Vector3> out_vel;
@@ -109,6 +118,7 @@ private:
 	LocalVector<uint8_t> out_yield;
 	LocalVector<uint8_t> out_state;
 	LocalVector<uint8_t> out_wants;
+	LocalVector<int> out_link; // Связь текущего угла пути (начало связи впереди), -1 — нет
 	LocalVector<int> stuck_total;
 	LocalVector<int> blocked_total;
 	LocalVector<int> yield_total;
@@ -119,6 +129,7 @@ private:
 	LocalVector<uint8_t> prev_yield;
 	LocalVector<Input> start_in; // Входы на начало тика (цель, остановка — для очереди)
 	LocalVector<uint8_t> prev_state;
+	LocalVector<int> prev_link;
 	LocalVector<uint32_t> free_handles;
 	int64_t next_prio = 0;
 	uint64_t stepped_tick = UINT64_MAX;
@@ -151,6 +162,7 @@ private:
 	Vector3 _overlap(const Vector3 &p_pos) const;
 	void _advance(Follow &r_f, const Vector3 &p_pos) const;
 	real_t _remaining(const Follow &p_f, const Vector3 &p_pos) const;
+	int _corner_link(const Follow &p_f) const;
 	real_t _off_path(const Follow &p_f, const Vector3 &p_pos) const;
 	bool _wants_path(const Follow &p_f, const Input &p_in) const;
 	void _track_stuck(uint32_t p_h, Follow &r_f, const Vector3 &p_pos, real_t p_want_speed, real_t p_dt);
@@ -171,8 +183,9 @@ public:
 	void agent_remove(int p_h);
 	// Вход после своего тика: поза, цель (has_goal = false — цели нет), stop_dist, скорость
 	void agent_commit(int p_h, const Vector3 &p_local_pos, const Vector3 &p_goal, bool p_has_goal, real_t p_stop_dist, real_t p_speed);
-	// Путь (точки, цель запроса); пустой — пути нет (BLOCKED). Применяется со следующего тика.
-	void agent_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target);
+	// Путь (точки, цель запроса, номера связей по точкам — пусто: без связей); пустой — пути нет (BLOCKED).
+	// Применяется со следующего тика.
+	void agent_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links = PackedInt32Array());
 	Vector3 agent_velocity(int p_h); // Желаемая скорость (локальная, XZ)
 	int agent_state(int p_h);
 	bool agent_wants_path(int p_h);
@@ -182,6 +195,11 @@ public:
 	int agent_stuck_total(int p_h) const;
 	int agent_blocked_total(int p_h) const;
 	int agent_yield_total(int p_h) const;
+	int agent_link(int p_h); // Связь текущего угла пути, -1 — нет
+	void agent_set_airborne(int p_h, bool p_on); // На связи: соседи не видят, расчёта нет (со следующего)
+	void agent_link_done(int p_h); // Связь пройдена: путь — с её конца (со следующего расчёта)
+	// Агентов не на связи ближе p_r по горизонтали (по высоте ±NEAR_H) к локальной точке; позы на начало тика
+	int count_near(const Vector3 &p_local, real_t p_r, int p_exclude);
 	int get_agent_count() const;
 	int64_t get_last_step_usec() const { return (int64_t)last_step_usec; }
 };
