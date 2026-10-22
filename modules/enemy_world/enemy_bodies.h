@@ -1,5 +1,6 @@
 #pragma once
 
+#include "enemy_links.h"
 #include "enemy_views.h"
 #include "enemy_world.h"
 
@@ -26,7 +27,10 @@ class Node3D;
 // скорости — покой: без move_and_slide, полный шаг раз в REST_CHECK_TICKS) → вход толпе, поза визуалу
 // (EnemyViews), поза тика для сети (net_pack). Бой и решения — у GDScript: тик возвращает события (пары «вид,
 // ручка»: клип замаха, удар, запрос пути в слот ходока, предметы у ног), их решает проход карты (EnemyPass).
-// Тела — CharacterBody3D (ObjectID; пропавшее тело пропускается). Координаты толпы — корня карты.
+// Тела — CharacterBody3D (ObjectID; пропавшее тело пропускается). Координаты толпы — корня карты. Связи (план
+// 2026-10-22-nav-links-b; enemy_bodies_links.cpp): у входа связи (толпа AGENT_LINK) — ждёт (закрыта, занята, место
+// приземления занято — копит закрытие), на связи — поза по траектории профиля без физики (оба яруса), приземлился —
+// LAND_S стоит; события — клип прыжка, закрыть / открыть связь (ручка — номер связи).
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -48,6 +52,9 @@ public:
 		EVENT_STRIKE, // Удар (GDScript: EnemyWalker.strike → body_add_hits)
 		EVENT_PATH, // Запрос пути (GDScript: NavWorld.query → body_set_path)
 		EVENT_ITEMS, // Предметы у ног (GDScript: WalkerItemPush.tick)
+		EVENT_JUMP, // Клип связи (GDScript: EnemyWalker.play_action(JUMP_CLIP))
+		EVENT_LINK_CLOSE, // Закрыть связь в карте (ручка — номер связи; NavLinkSet.set_enabled)
+		EVENT_LINK_OPEN, // Открыть связь в карте (ручка — номер связи)
 	};
 
 	// Мозг (WalkerBrain)
@@ -79,8 +86,20 @@ public:
 	static constexpr real_t NEAR_R = 12.0f;
 	static constexpr real_t TIER_HYST = 1.0f;
 	static constexpr int PATH_SLOTS = 16; // = NavWorld.SLOTS
+	// Связи (план 2026-10-22-nav-links-b)
+	static constexpr real_t LAND_FREE_R = 0.8f; // Место приземления занято: другой ходок ближе
+	static constexpr real_t LAND_CLOSE_R = 0.5f; // Приземлился ближе к другому — счётчик land_close (проба)
+	static constexpr real_t LAND_S = 0.25f; // После приземления стоит
+	static constexpr uint32_t LINK_LOG = 16; // Видов пройденных связей в журнале тела (пробы)
 
 private:
+	enum LinkState {
+		LINK_NONE,
+		LINK_WAIT, // У входа
+		LINK_ON, // На связи
+		LINK_LAND, // Приземлился (LAND_S)
+	};
+
 	struct Body {
 		bool used = false;
 		bool dead = false;
@@ -124,6 +143,16 @@ private:
 		int net_id = -1;
 		int64_t net_tick = -1;
 		Vector3 net_pos;
+		// Связи
+		uint8_t link_state = LINK_NONE;
+		int link = -1; // Номер связи (ждёт у входа / на ней)
+		EnemyLinks::Motion motion;
+		real_t link_t = 0.0f;
+		uint64_t land_end = 0;
+		real_t jump_impulse = 4.2f; // Профиль тела (NavMoveProfile)
+		real_t jump_gravity = 9.8f;
+		uint32_t path_epoch = 0; // Эпоха навигации последнего запроса пути
+		LocalVector<uint8_t> link_log; // Виды пройденных связей (пробы)
 	};
 
 	LocalVector<Body> bodies;
@@ -144,11 +173,22 @@ private:
 	uint64_t last_tick_usec = 0;
 	int tier_counts[2] = {};
 	int rest_count = 0;
+	EnemyLinks links;
+	uint32_t nav_epoch = 0; // Связь закрыта / открыта — стоящие (HOLD, у входа) переспрашивают путь
+	int traversals = 0;
+	int land_close = 0;
+	int on_link = 0;
 
 	bool _valid(int p_h) const;
 	void _root_xforms();
 	void _emit(int p_kind, int p_h);
 	void _tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt);
+	void _publish(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_vel, const Vector3 &p_goal, bool p_has_goal, uint64_t p_now);
+	// Связи (enemy_bodies_links.cpp)
+	void _links_tick(real_t p_dt);
+	bool _link_wait(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt);
+	void _link_move(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
+	void _link_release(int p_h, Body &r_b);
 	Transform3D _frame_xform(const Body &p_b) const;
 	Transform3D _carry(Body &r_b, CharacterBody3D *p_body);
 	static Vector3 _forward(const Body &p_b, const Transform3D &p_fx);
@@ -187,7 +227,12 @@ public:
 	void body_kill(int p_h); // Смерть: толпа отпускает агента, вид выключен, тик пропускает тело
 	void body_set_frame(int p_h, Node3D *p_frame); // Система отсчёта (ReferenceFrame: query_xform), null — мир
 	void body_set_point(int p_h, const Vector3 &p_world); // Точка пробы: идти туда без боя
-	void body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target);
+	void body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links = PackedInt32Array());
+	void body_set_profile(int p_h, real_t p_jump_impulse, real_t p_gravity); // Профиль навигации тела (связи)
+	PackedInt32Array body_link_log(int p_h) const; // Виды пройденных связей по порядку
+	int body_link_state(int p_h) const;
+	// Таблица связей карты (координаты корня; номер — NavLinkSet.links)
+	void set_links(const PackedVector3Array &p_starts, const PackedVector3Array &p_ends, const PackedInt32Array &p_kinds);
 	void body_add_hits(int p_h, int p_hits);
 	void body_set_net_id(int p_h, int p_net_id);
 	real_t body_yaw(int p_h) const;
@@ -217,6 +262,10 @@ public:
 	int get_tier_count(int p_tier) const;
 	int get_rest_count() const { return rest_count; } // Тел в покое за последний тик
 	int64_t get_last_tick_usec() const { return (int64_t)last_tick_usec; }
+	int get_traversals() const { return traversals; } // Входов на связь всего
+	int get_land_close() const { return land_close; } // Приземлений ближе LAND_CLOSE_R к другому
+	int get_closed_links() const { return links.closed_count(); }
+	int get_on_link_count() const { return on_link; } // На связи в последнем тике
 };
 
 VARIANT_ENUM_CAST(EnemyBodies::Brain);

@@ -67,6 +67,7 @@ int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_vi
 void EnemyBodies::body_remove(int p_h) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
+	_link_release(p_h, b);
 	if (crowd.is_valid() && b.crowd >= 0) {
 		crowd->agent_remove(b.crowd);
 	}
@@ -82,6 +83,9 @@ void EnemyBodies::body_kill(int p_h) {
 	}
 	b.dead_stats = body_crowd_stats(p_h);
 	b.dead = true;
+	_link_release(p_h, b);
+	b.link_state = LINK_NONE;
+	b.link = -1;
 	if (crowd.is_valid() && b.crowd >= 0) {
 		crowd->agent_remove(b.crowd);
 		b.crowd = -1;
@@ -108,11 +112,11 @@ void EnemyBodies::body_set_point(int p_h, const Vector3 &p_world) {
 	b.moving = true;
 }
 
-void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target) {
+void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links) {
 	ERR_FAIL_COND(!_valid(p_h));
 	const Body &b = bodies[p_h];
 	if (crowd.is_valid() && b.crowd >= 0) {
-		crowd->agent_set_path(b.crowd, p_points, p_target);
+		crowd->agent_set_path(b.crowd, p_points, p_target, p_links);
 	}
 }
 
@@ -242,6 +246,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	tier_counts[TIER_FAR] = 0;
 	rest_count = 0;
 	_root_xforms();
+	_links_tick(p_delta);
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
 		Body &b = bodies[h];
@@ -258,9 +263,13 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	return events;
 }
 
-// Порядок — EnemyWalker._physics_process (до этапа 2).
+// Порядок — EnemyWalker._physics_process (до этапа 2); связь — своя ветка (enemy_bodies_links.cpp).
 void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt) {
 	const Transform3D fx = _carry(r_b, p_body);
+	if (r_b.link_state == LINK_ON || r_b.link_state == LINK_LAND) {
+		_link_move(p_h, r_b, p_body, fx, p_now, p_dt);
+		return;
+	}
 	Vector3 want; // Мир
 	uint8_t st = EnemyWorld::AGENT_IDLE;
 	bool has_goal = false;
@@ -272,19 +281,33 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 			goal = root_inv.xform(r_b.world);
 		}
 		const Vector3 w = crowd->agent_velocity(r_b.crowd); // По входам на начало тика
-		if (has_goal && crowd->agent_wants_path(r_b.crowd) && (p_now + (uint64_t)r_b.slot) % PATH_SLOTS == 0) {
+		st = (uint8_t)crowd->agent_state(r_b.crowd);
+		const int at_link = st == EnemyWorld::AGENT_LINK ? crowd->agent_link(r_b.crowd) : -1;
+		// Переспросить путь: толпа хочет; у входа закрытой связи; связь закрылась / открылась (стоящие)
+		const bool repath = crowd->agent_wants_path(r_b.crowd) || (links.valid(at_link) && links.closed(at_link)) ||
+				(r_b.path_epoch != nav_epoch && (st == EnemyWorld::AGENT_HOLD || st == EnemyWorld::AGENT_LINK));
+		if (has_goal && repath && (p_now + (uint64_t)r_b.slot) % PATH_SLOTS == 0) {
 			r_b.path_from = root_inv.xform(p_body->get_global_position());
 			r_b.goal = goal;
 			r_b.path_requests++;
+			r_b.path_epoch = nav_epoch;
 			_emit(EVENT_PATH, p_h);
 		}
 		want = root_xf.basis.xform(w);
-		st = (uint8_t)crowd->agent_state(r_b.crowd);
+	}
+	if (st == EnemyWorld::AGENT_LINK && has_goal) {
+		_link_wait(p_h, r_b, p_body, p_now, p_dt); // Ушёл на связь — двигается со следующего тика
+	} else if (r_b.link_state == LINK_WAIT) {
+		r_b.link_state = LINK_NONE;
+		r_b.link = -1;
 	}
 	const Vector3 pos0 = p_body->get_global_position();
 	const Vector3 look = r_b.moving ? r_b.world : r_b.face;
 	const bool hold = st == EnemyWorld::AGENT_HOLD; // Стоит в толпе — лицом к цели, не по толчкам соседей
-	const Vector3 face = (r_b.moving && !hold && want.length() > FACE_MOVE_SPEED) ? want : look - pos0;
+	Vector3 face = (r_b.moving && !hold && want.length() > FACE_MOVE_SPEED) ? want : look - pos0;
+	if (r_b.link_state != LINK_NONE && links.valid(r_b.link)) {
+		face = root_xf.xform(links.end(r_b.link)) - pos0; // У входа связи — лицом к её концу
+	}
 	_update_tier(r_b, pos0);
 	Vector3 vel;
 	if (r_b.tier == TIER_FAR) {
@@ -303,17 +326,22 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	}
 	r_b.want_speed = want.length();
 	r_b.state = st;
+	_publish(r_b, p_body, fx, vel, goal, has_goal, p_now);
+}
+
+// Конец тика тела: вход толпе, поза и шаг визуалу, поза тика сети, счётчик яруса.
+void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_vel, const Vector3 &p_goal, bool p_has_goal, uint64_t p_now) {
 	const Vector3 pos = p_body->get_global_position();
 	if (crowd.is_valid() && r_b.crowd >= 0) {
-		crowd->agent_commit(r_b.crowd, root_inv.xform(pos), goal, has_goal, r_b.stop_dist, r_b.speed);
+		crowd->agent_commit(r_b.crowd, root_inv.xform(pos), p_goal, p_has_goal, r_b.stop_dist, r_b.speed);
 	}
-	const Basis torso = fx.basis * Basis(UP_AXIS, r_b.yaw);
-	r_b.view_speed = vel.dot(torso.xform(Vector3(0.0f, 0.0f, -1.0f)));
+	const Basis torso = p_fx.basis * Basis(UP_AXIS, r_b.yaw);
+	r_b.view_speed = p_vel.dot(torso.xform(Vector3(0.0f, 0.0f, -1.0f)));
 	if (views.is_valid() && r_b.view >= 0) {
 		views->view_commit(r_b.view, Transform3D(torso, pos), r_b.lag_curr, r_b.view_speed);
 	}
 	r_b.net_tick = (int64_t)p_now;
-	r_b.net_pos = fx.affine_inverse().xform(pos);
+	r_b.net_pos = p_fx.affine_inverse().xform(pos);
 	tier_counts[r_b.tier]++;
 }
 
@@ -725,7 +753,11 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_kill", "handle"), &EnemyBodies::body_kill);
 	ClassDB::bind_method(D_METHOD("body_set_frame", "handle", "frame"), &EnemyBodies::body_set_frame);
 	ClassDB::bind_method(D_METHOD("body_set_point", "handle", "world"), &EnemyBodies::body_set_point);
-	ClassDB::bind_method(D_METHOD("body_set_path", "handle", "points", "target"), &EnemyBodies::body_set_path);
+	ClassDB::bind_method(D_METHOD("body_set_path", "handle", "points", "target", "links"), &EnemyBodies::body_set_path, DEFVAL(PackedInt32Array()));
+	ClassDB::bind_method(D_METHOD("body_set_profile", "handle", "jump_impulse", "gravity"), &EnemyBodies::body_set_profile);
+	ClassDB::bind_method(D_METHOD("body_link_log", "handle"), &EnemyBodies::body_link_log);
+	ClassDB::bind_method(D_METHOD("body_link_state", "handle"), &EnemyBodies::body_link_state);
+	ClassDB::bind_method(D_METHOD("set_links", "starts", "ends", "kinds"), &EnemyBodies::set_links);
 	ClassDB::bind_method(D_METHOD("body_add_hits", "handle", "hits"), &EnemyBodies::body_add_hits);
 	ClassDB::bind_method(D_METHOD("body_set_net_id", "handle", "net_id"), &EnemyBodies::body_set_net_id);
 	ClassDB::bind_method(D_METHOD("body_yaw", "handle"), &EnemyBodies::body_yaw);
@@ -753,6 +785,10 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_tier_count", "tier"), &EnemyBodies::get_tier_count);
 	ClassDB::bind_method(D_METHOD("get_rest_count"), &EnemyBodies::get_rest_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyBodies::get_last_tick_usec);
+	ClassDB::bind_method(D_METHOD("get_traversals"), &EnemyBodies::get_traversals);
+	ClassDB::bind_method(D_METHOD("get_land_close"), &EnemyBodies::get_land_close);
+	ClassDB::bind_method(D_METHOD("get_closed_links"), &EnemyBodies::get_closed_links);
+	ClassDB::bind_method(D_METHOD("get_on_link_count"), &EnemyBodies::get_on_link_count);
 
 	BIND_ENUM_CONSTANT(BRAIN_IDLE);
 	BIND_ENUM_CONSTANT(BRAIN_CHASE);
@@ -764,4 +800,7 @@ void EnemyBodies::_bind_methods() {
 	BIND_ENUM_CONSTANT(EVENT_STRIKE);
 	BIND_ENUM_CONSTANT(EVENT_PATH);
 	BIND_ENUM_CONSTANT(EVENT_ITEMS);
+	BIND_ENUM_CONSTANT(EVENT_JUMP);
+	BIND_ENUM_CONSTANT(EVENT_LINK_CLOSE);
+	BIND_ENUM_CONSTANT(EVENT_LINK_OPEN);
 }
