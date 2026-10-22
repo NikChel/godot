@@ -83,6 +83,7 @@ private:
 		ObjectID zone_id;
 		ObjectID frame_id;
 		Transform3D frame_last;
+		Vector3 up = Vector3(0.0f, 1.0f, 0.0f); // Верх тела (up_direction): у CharacterBody3D в C++ он приватный — держим здесь
 		int crowd = -1; // Ручка EnemyWorld
 		int view = -1; // Ручка EnemyViews
 		int slot = 0;

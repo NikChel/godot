@@ -56,6 +56,7 @@ int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_vi
 	b.slot = p_slot;
 	b.speed = p_speed;
 	b.yaw = p_yaw;
+	b.up = p_body->get(SNAME("up_direction"));
 	if (crowd.is_valid()) {
 		_root_xforms();
 		b.crowd = crowd->agent_add(root_inv.xform(p_body->get_global_position()));
@@ -326,7 +327,8 @@ Transform3D EnemyBodies::_carry(Body &r_b, CharacterBody3D *p_body) {
 		const Vector3 vel = r_b.frame_last.basis.transposed().xform(p_body->get_velocity());
 		p_body->set_global_transform(Transform3D(now.basis, now.xform(local)));
 		p_body->set_velocity(now.basis.xform(vel));
-		p_body->set_up_direction(now.basis.get_column(1).normalized());
+		r_b.up = now.basis.get_column(1).normalized();
+		p_body->set(SNAME("up_direction"), r_b.up);
 		r_b.frame_last = now;
 	}
 	return now;
@@ -373,7 +375,7 @@ int EnemyBodies::_pick(const Vector3 &p_pos) const {
 
 // Цель ближе REACH (по горизонтали верха тела) и в секторе перед взглядом.
 bool EnemyBodies::_in_reach(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const {
-	const Vector3 up = p_body->get_up_direction();
+	const Vector3 up = p_b.up;
 	Vector3 d = p_target - p_body->get_global_position();
 	d -= up * d.dot(up);
 	if (d.length() > REACH) {
@@ -471,7 +473,7 @@ void EnemyBodies::_update_tier(Body &r_b, const Vector3 &p_pos) {
 // WalkerMover.tick: горизонтальная скорость к желаемой с разгоном ACCEL, гравитация вдоль верха тела,
 // move_and_slide; шаг на ступень с пола или в тик после принятого шага; взгляд.
 void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt) {
-	const Vector3 up = p_body->get_up_direction();
+	const Vector3 up = r_b.up;
 	const Vector3 v = p_body->get_velocity();
 	Vector3 v_up = up * v.dot(up);
 	const Vector3 want_h = p_want - up * p_want.dot(up);
@@ -495,7 +497,7 @@ void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &
 
 // FAR: без физики — шаг по сетке навигации (точка сетки по вертикали, EnemyWorld.column), тот же разгон и взгляд.
 Vector3 EnemyBodies::_move_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt) {
-	const Vector3 up = p_body->get_up_direction();
+	const Vector3 up = r_b.up;
 	const Vector3 v = p_body->get_velocity();
 	const Vector3 want_h = p_want - up * p_want.dot(up);
 	const Vector3 v_h = (v - up * v.dot(up)).move_toward(want_h, ACCEL * p_dt);
