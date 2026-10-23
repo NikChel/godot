@@ -42,6 +42,7 @@ public:
 	static constexpr real_t RAY_DOWN = 200.0f;
 	static constexpr real_t STEP_H = 0.35f; // Перепад не больше — шаг ногами (= NavWorld.agent_max_climb)
 	static constexpr real_t NEAR_D = 1.0f; // Ближе — спрыгнуть / залезть у края; дальше — прыжок
+	static constexpr real_t CLIMB_FAR_D = 2.0f; // Прыжок не по силам — залезть и дальше NEAR_D (круглая / скошенная стена), без провала под ходом
 	static constexpr real_t SNAP_H = 0.35f; // Край сетки дальше от попадания луча — мимо сетки
 	static constexpr real_t SNAP_V = 0.3f;
 	static constexpr real_t SHORTCUT_MUL = 2.0f; // Пешком не длиннее max(MUL × по прямой, по прямой + EXTRA) — связь не нужна
@@ -200,6 +201,7 @@ private:
 	void _scan_step(const Sample &p_s, int p_k);
 	bool _level_taken(real_t p_y) const;
 	bool _ground(const Vector3 &p_q, real_t p_base_y, Vector3 &r_hit) const;
+	bool _no_gap(const Vector3 &p_from, const Vector3 &p_to) const;
 	uint32_t _layers(int p_kind, real_t p_dh, real_t p_dist, bool p_touches_narrow) const;
 	const Profile &_strongest(uint32_t p_layers) const;
 	bool _clear(const LocalVector<Vector3> &p_traj) const;

@@ -351,12 +351,18 @@ void EnemyLinkGen::_scan_step(const Sample &p_s, int p_k) {
 	}
 	const real_t dh = land.y - p_s.p.y;
 	const real_t dist = Vector2(land.x - p_s.p.x, land.z - p_s.p.z).length();
-	const int kind = _kind(dh, dist);
+	int kind = _kind(dh, dist);
 	if (kind < 0) {
 		return;
 	}
 	const bool end_narrow = poly >= main_polys;
-	const uint32_t lay = _layers(kind, dh, dist, p_s.narrow || end_narrow);
+	uint32_t lay = _layers(kind, dh, dist, p_s.narrow || end_narrow);
+	// Прыжок вверх никому не по силам, а залезть — да: край верха дальше NEAR_D (стена круглая или скошенная, обе
+	// сетки отступают от неё на радиус) — залезть, если под ходом нет провала.
+	if (lay == 0 && kind == KIND_JUMP && dh > STEP_H && dist <= CLIMB_FAR_D && _no_gap(p_s.p, land)) {
+		kind = KIND_CLIMB;
+		lay = _layers(kind, dh, dist, p_s.narrow || end_narrow);
+	}
 	if (lay == 0) {
 		return;
 	}
@@ -407,6 +413,19 @@ bool EnemyLinkGen::_ground(const Vector3 &p_q, real_t p_base_y, Vector3 &r_hit) 
 		return false;
 	}
 	r_hit = root_inv.xform(r.position);
+	return true;
+}
+
+// Под ходом от from к to (по горизонтали, шагом SCAN_STEP) опора не ниже from на STEP_H: стена, а не провал.
+bool EnemyLinkGen::_no_gap(const Vector3 &p_from, const Vector3 &p_to) const {
+	const Vector3 d(p_to.x - p_from.x, 0.0f, p_to.z - p_from.z);
+	const int n = (int)Math::floor(d.length() / SCAN_STEP);
+	for (int i = 1; i <= n; i++) {
+		Vector3 hit;
+		if (!_ground(p_from + d * ((real_t)i / (n + 1)), p_from.y, hit) || hit.y < p_from.y - STEP_H) {
+			return false;
+		}
+	}
 	return true;
 }
 
