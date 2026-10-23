@@ -327,8 +327,9 @@ void EnemyWorld::_adopt_path(uint32_t p_h, Follow &r_f) {
 	}
 	const Vector<int> &lk = path_new_links[p_h];
 	r_f.links.resize(r_f.path.size());
+	// Связь на последней точке приземления в этом пути не имеет: после неё corner++ ушёл бы за конец пути.
 	for (uint32_t i = 0; i < r_f.path.size(); i++) {
-		r_f.links[i] = (int)i < lk.size() ? lk[i] : -1;
+		r_f.links[i] = ((int)i < lk.size() && i + 1 < r_f.path.size()) ? lk[i] : -1;
 	}
 	r_f.path_target = path_new_target[p_h];
 	r_f.corner = 1;
