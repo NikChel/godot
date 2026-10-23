@@ -877,6 +877,7 @@ Array EnemyBodies::net_pack() const {
 			data.push_back(b.yaw);
 			data.push_back(b.view_speed);
 			data.push_back(b.lag_curr);
+			data.push_back((float)b.space);
 		}
 	}
 	Array out;

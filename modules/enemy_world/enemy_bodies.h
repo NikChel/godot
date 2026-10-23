@@ -293,7 +293,7 @@ public:
 	void set_nav_ready(bool p_ready); // Сетка корабля (пространство 0)
 	void set_tier_override(int p_tier); // -1 — по расстоянию (пробы: TIER_NEAR / TIER_FAR)
 	PackedInt32Array tick(real_t p_delta); // События: пары (Event, ручка)
-	Array net_pack() const; // [тик, PackedInt32Array net id, PackedFloat32Array по 6 чисел: x, y, z, yaw, speed, step_lag]
+	Array net_pack() const; // [тик, PackedInt32Array net id, PackedFloat32Array по 7 чисел: x, y, z, yaw, speed, step_lag, пространство] (поза и взгляд — в системе пространства)
 	int get_body_count() const;
 	int get_tier_count(int p_tier) const;
 	int get_rest_count() const { return rest_count; } // Тел в покое за последний тик

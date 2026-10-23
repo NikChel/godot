@@ -18,6 +18,47 @@ void EnemyReplicas::set_views(const Ref<EnemyViews> &p_views) {
 	views = p_views;
 }
 
+void EnemyReplicas::set_root(Node3D *p_root) {
+	ERR_FAIL_NULL(p_root);
+	spaces.clear();
+	Space s;
+	s.node_id = p_root->get_instance_id();
+	spaces.push_back(s);
+	_space_xforms();
+}
+
+int EnemyReplicas::space_add(Node3D *p_frame) {
+	ERR_FAIL_NULL_V(p_frame, -1);
+	ERR_FAIL_COND_V_MSG(spaces.is_empty(), -1, "EnemyReplicas: set_root first (space 0 — the map root).");
+	Space s;
+	s.node_id = p_frame->get_instance_id();
+	s.frame = true;
+	spaces.push_back(s);
+	_space_xforms();
+	return (int)spaces.size() - 1;
+}
+
+// Позы пространств этого тика: корень — global_transform, система — query_xform (как EnemyBodies::_space_xforms).
+void EnemyReplicas::_space_xforms() {
+	for (Space &s : spaces) {
+		Object *o = ObjectDB::get_instance(s.node_id);
+		if (s.frame) {
+			s.xf = o ? (Transform3D)o->call(SNAME("query_xform")) : Transform3D();
+		} else {
+			Node3D *n = Object::cast_to<Node3D>(o);
+			s.xf = n ? n->get_global_transform() : Transform3D();
+		}
+	}
+}
+
+// Поза пространства; номер вне реестра — корабль (0), реестра нет — мир.
+Transform3D EnemyReplicas::_space_xf(int p_space) const {
+	if (spaces.is_empty()) {
+		return Transform3D();
+	}
+	return spaces[p_space >= 0 && p_space < (int)spaces.size() ? p_space : 0].xf;
+}
+
 int EnemyReplicas::replica_add(Node3D *p_body, int p_view, int p_net_id) {
 	int h;
 	if (!free_handles.is_empty()) {
@@ -146,9 +187,14 @@ bool EnemyReplicas::_sample(Replica &r_r, const double *p_times, double p_seek) 
 	return true;
 }
 
+// Соседние точки разных пространств — без смешения: до времени b — a, с него — b.
 void EnemyReplicas::_take(Replica &r_r, int p_a, int p_b, real_t p_f) {
 	const float *a = r_r.d + p_a * F;
 	const float *b = r_r.d + p_b * F;
+	if (a[6] != b[6]) {
+		p_f = p_f < 1.0f ? 0.0f : 1.0f;
+	}
+	r_r.space = (int)(p_f < 1.0f ? a[6] : b[6]);
 	r_r.pos = Vector3(Math::lerp(a[0], b[0], p_f), Math::lerp(a[1], b[1], p_f), Math::lerp(a[2], b[2], p_f));
 	r_r.yaw = Math::lerp_angle(a[3], b[3], p_f);
 	r_r.speed = Math::lerp(a[4], b[4], p_f);
@@ -180,6 +226,11 @@ real_t EnemyReplicas::replica_yaw(int p_h) const {
 	return reps[p_h].yaw;
 }
 
+int EnemyReplicas::replica_space(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), 0);
+	return reps[p_h].space;
+}
+
 real_t EnemyReplicas::replica_speed(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), 0.0f);
 	return reps[p_h].speed;
@@ -190,22 +241,26 @@ real_t EnemyReplicas::replica_step_lag(int p_h) const {
 	return reps[p_h].step_lag;
 }
 
-// Физ-тик копий: поза показа в тело (система отсчёта копии — мир), поза визуалу, наступившие события.
+// Физ-тик копий: позы пространств этого тика; поза показа — в мир позой своего пространства — в тело, поза визуалу
+// (базис — пространства × взгляд), наступившие события.
 PackedInt32Array EnemyReplicas::tick(double p_seek) {
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
 	due_handles.clear();
 	due_clips.clear();
+	_space_xforms();
 	for (uint32_t h = 0; h < reps.size(); h++) {
 		Replica &r = reps[h];
 		if (!r.used) {
 			continue;
 		}
 		Node3D *body = r.body_id.is_valid() ? Object::cast_to<Node3D>(ObjectDB::get_instance(r.body_id)) : nullptr;
-		if (body != nullptr && _sample(r, r.t_local, p_seek)) {
-			body->set_global_position(r.pos);
+		const bool sampled = body != nullptr && _sample(r, r.t_local, p_seek);
+		const Transform3D xf = _space_xf(r.space);
+		if (sampled) {
+			body->set_global_position(xf.xform(r.pos));
 		}
 		if (body != nullptr && views.is_valid() && r.view >= 0) {
-			views->view_commit(r.view, Transform3D(Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw), body->get_global_position()), r.step_lag, r.speed);
+			views->view_commit(r.view, Transform3D(xf.basis * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw), body->get_global_position()), r.step_lag, r.speed);
 		}
 		StringName e = _pop_due(r, p_seek);
 		while (e != NONE_EVENT) {
@@ -224,6 +279,10 @@ int EnemyReplicas::get_replica_count() const {
 
 void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_views", "views"), &EnemyReplicas::set_views);
+	ClassDB::bind_method(D_METHOD("set_root", "root"), &EnemyReplicas::set_root);
+	ClassDB::bind_method(D_METHOD("space_add", "frame"), &EnemyReplicas::space_add);
+	ClassDB::bind_method(D_METHOD("get_space_count"), &EnemyReplicas::get_space_count);
+	ClassDB::bind_method(D_METHOD("replica_space", "handle"), &EnemyReplicas::replica_space);
 	ClassDB::bind_method(D_METHOD("replica_add", "body", "view", "net_id"), &EnemyReplicas::replica_add);
 	ClassDB::bind_method(D_METHOD("replica_remove", "handle"), &EnemyReplicas::replica_remove);
 	ClassDB::bind_method(D_METHOD("feed", "handle", "t_local", "t_host", "data", "at"), &EnemyReplicas::feed);
