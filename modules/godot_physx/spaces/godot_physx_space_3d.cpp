@@ -793,6 +793,56 @@ bool separation_ray_push(const SeparationRay &p_ray, const PxRaycastHit &p_hit, 
 	return r_amount > 0.0f;
 }
 
+// NikChel: whether a motion sweep's hit on triangle p_face at p_point is on an internal facet edge
+// (or inside the face) -- then the face normal (r_face_n) is the surface's. An edge counts as touched
+// when the point lies within INTERNAL_EDGE_EPS of it; internal when the neighbour across it (adjacency
+// from cooking, matched by its two shared vertices) is within INTERNAL_EDGE_COS of coplanar. No
+// adjacency data or no neighbour (mesh border) -- convex, keep PhysX's normal.
+constexpr PxReal INTERNAL_EDGE_EPS = 0.002f;
+constexpr PxReal INTERNAL_EDGE_COS = 0.985f; // ~10 degrees
+
+bool trimesh_internal_hit(const PxTriangleMeshGeometry &p_geom, const PxTransform &p_pose, PxU32 p_face, const PxVec3 &p_point, PxVec3 &r_face_n) {
+	const bool has_adj = p_geom.triangleMesh && (p_geom.triangleMesh->getTriangleMeshFlags() & PxTriangleMeshFlag::eADJACENCY_INFO);
+	PxTriangle tri;
+	PxU32 vi[3];
+	PxU32 adj[3] = { 0xffffffffu, 0xffffffffu, 0xffffffffu };
+	PxMeshQuery::getTriangle(p_geom, p_pose, p_face, tri, vi, has_adj ? adj : nullptr);
+	tri.normal(r_face_n);
+	for (int e = 0; e < 3; e++) {
+		const PxVec3 &a = tri.verts[e];
+		const PxVec3 &b = tri.verts[(e + 1) % 3];
+		const PxVec3 ab = b - a;
+		const PxReal len2 = ab.magnitudeSquared();
+		const PxReal t = len2 > 1e-12f ? PxClamp((p_point - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;
+		if ((a + ab * t - p_point).magnitudeSquared() > INTERNAL_EDGE_EPS * INTERNAL_EDGE_EPS) {
+			continue; // edge not touched
+		}
+		bool coplanar = false;
+		for (int k = 0; k < 3 && !coplanar; k++) {
+			if (adj[k] == 0xffffffffu) {
+				continue;
+			}
+			PxTriangle other;
+			PxU32 ovi[3];
+			PxMeshQuery::getTriangle(p_geom, p_pose, adj[k], other, ovi, nullptr);
+			int shared = 0;
+			for (int m = 0; m < 3; m++) {
+				shared += (ovi[m] == vi[e] || ovi[m] == vi[(e + 1) % 3]) ? 1 : 0;
+			}
+			if (shared < 2) {
+				continue; // neighbour across another edge
+			}
+			PxVec3 other_n;
+			other.normal(other_n);
+			coplanar = PxAbs(other_n.dot(r_face_n)) >= INTERNAL_EDGE_COS;
+		}
+		if (!coplanar) {
+			return false;
+		}
+	}
+	return true;
+}
+
 // Whether to ignore an initial overlap of a motion test's shape with a mesh.
 // p_depth < 0: depth unknown, always check.
 bool skip_one_sided_overlap(const PxRigidActor *p_actor, const PxShape *p_shape, PxReal p_depth, const PxVec3 &p_push_dir, const PxVec3 &p_motion_dir,
@@ -1014,18 +1064,20 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 						}
 					} else if (hit.block.actor && hit.block.shape && hit.block.faceIndex != 0xffffffffu &&
 							hit.block.shape->getGeometry().getType() == PxGeometryType::eTRIANGLEMESH) {
+						// NikChel: only on internal edges (inside the face, or every touched edge
+						// shared with a near-coplanar neighbour). On a convex edge -- a lip, a step,
+						// a mesh border -- PhysX's normal is the true contact normal: the face
+						// normal of a lip's vertical face turned a 3 mm seam into a wall.
 						const PxTransform hit_pose = hit.block.actor->getGlobalPose() *
 								hit.block.shape->getLocalPose();
-						PxTriangle tri;
-						PxMeshQuery::getTriangle(
-								static_cast<const PxTriangleMeshGeometry &>(hit.block.shape->getGeometry()),
-								hit_pose, hit.block.faceIndex, tri);
 						PxVec3 face_n;
-						tri.normal(face_n);
-						if (face_n.dot(hit.block.normal) < 0.0f) {
-							face_n = -face_n;
+						if (trimesh_internal_hit(static_cast<const PxTriangleMeshGeometry &>(hit.block.shape->getGeometry()),
+									hit_pose, hit.block.faceIndex, hit.block.position, face_n)) {
+							if (face_n.dot(hit.block.normal) < 0.0f) {
+								face_n = -face_n;
+							}
+							hit.block.normal = face_n;
 						}
-						hit.block.normal = face_n;
 					}
 					// eMTD reports an initial overlap as a negative distance with the
 					// push-out normal. The body isn't blocked from moving -- it just

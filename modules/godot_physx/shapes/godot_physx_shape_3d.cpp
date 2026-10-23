@@ -246,6 +246,8 @@ void GodotPhysXShape3D::set_data(const Variant &p_data) {
 			PxCookingParams params(physics->getTolerancesScale());
 			params.meshWeldTolerance = 0.001f;
 			params.meshPreprocessParams |= PxMeshPreprocessingFlag::eWELD_VERTICES;
+			// NikChel: neighbours across edges -- test_body_motion tells internal facet edges from convex ones.
+			params.buildTriangleAdjacencies = true;
 #ifdef GODOT_PHYSX_GPU
 			params.buildGPUData = true; // required for GPU dynamics to collide against the mesh
 #endif
