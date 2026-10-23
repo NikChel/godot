@@ -1466,6 +1466,13 @@ bool rcBuildRegionsMonotone(rcContext* ctx, rcCompactHeightfield& chf,
 			}
 			else
 			{
+				// NikChel: ids >= RC_BORDER_REG carry the border flag and past 0xFFFF wrap -- mergeAndFilterRegions
+				// then indexes past its array (crash baking a 254 m wide map with walkableRadius 0, sc_spaceship_4).
+				if (id >= RC_BORDER_REG)
+				{
+					ctx->log(RC_LOG_ERROR, "rcBuildRegionsMonotone: Region ID overflow");
+					return false;
+				}
 				sweeps[i].id = id++;
 			}
 		}
@@ -1775,6 +1782,13 @@ bool rcBuildLayerRegions(rcContext* ctx, rcCompactHeightfield& chf,
 			}
 			else
 			{
+				// NikChel: ids >= RC_BORDER_REG carry the border flag and past 0xFFFF wrap -- mergeAndFilterRegions
+				// then indexes past its array (crash baking a 254 m wide map with walkableRadius 0, sc_spaceship_4).
+				if (id >= RC_BORDER_REG)
+				{
+					ctx->log(RC_LOG_ERROR, "rcBuildLayerRegions: Region ID overflow");
+					return false;
+				}
 				sweeps[i].id = id++;
 			}
 		}
