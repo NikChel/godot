@@ -3,7 +3,8 @@
 #include "scene/3d/physics/character_body_3d.h"
 
 // Тела ходоков у связей (план docs/superpowers/plans/2026-10-22-nav-links-b.md): ждать у входа, пройти связь по
-// траектории профиля, приземлиться; закрытые связи — открыть, когда место приземления свободно.
+// траектории профиля, приземлиться; закрытые связи — открыть, когда место приземления свободно. Связи — только в
+// сетке корабля (пространство 0; spec 2026-10-23-enemy-moving-spaces, этап 2).
 
 void EnemyBodies::set_links(const PackedVector3Array &p_starts, const PackedVector3Array &p_ends, const PackedInt32Array &p_kinds) {
 	for (uint32_t h = 0; h < bodies.size(); h++) {
@@ -43,9 +44,10 @@ int EnemyBodies::body_link_state(int p_h) const {
 // Закрытые связи: место приземления свободно OPEN_S подряд — открыть (событие, эпоха навигации).
 void EnemyBodies::_links_tick(real_t p_dt) {
 	on_link = 0;
-	if (links.closed_count() == 0 || !crowd.is_valid()) {
+	if (links.closed_count() == 0 || spaces.is_empty() || !spaces[0].crowd.is_valid()) {
 		return;
 	}
+	EnemyWorld *crowd = spaces[0].crowd.ptr();
 	LocalVector<int> closed;
 	closed = links.closed_list(); // open_tick меняет список
 	for (const int l : closed) {
@@ -60,7 +62,8 @@ void EnemyBodies::_links_tick(real_t p_dt) {
 // занято — ждёт (занятое место копит закрытие связи); иначе — на связь: движение профиля тела, клип, толпа его не
 // видит. true — ушёл на связь.
 bool EnemyBodies::_link_wait(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt) {
-	const int l = crowd->agent_link(r_b.crowd);
+	EnemyWorld *crowd = _crowd(r_b);
+	const int l = (r_b.space == 0 && crowd != nullptr) ? crowd->agent_link(r_b.crowd) : -1;
 	if (!links.valid(l)) {
 		r_b.link_state = LINK_NONE;
 		r_b.link = -1;
@@ -82,7 +85,7 @@ bool EnemyBodies::_link_wait(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	links.claim(l, p_h);
 	EnemyLinks::Motion &m = r_b.motion;
 	m.kind = links.kind(l);
-	m.a = root_inv.xform(p_body->get_global_position());
+	m.a = spaces[0].inv.xform(p_body->get_global_position());
 	m.b = links.end(l);
 	m.walk = r_b.speed;
 	m.impulse = r_b.jump_impulse;
@@ -103,18 +106,19 @@ bool EnemyBodies::_link_wait(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 // путь с конца связи).
 void EnemyBodies::_link_move(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt) {
 	const bool has_goal = r_b.moving;
-	const Vector3 goal = has_goal ? root_inv.xform(r_b.world) : Vector3();
+	const Space &sp = spaces[0]; // На связи — всегда корабль (телепорт отпускает связь)
+	const Vector3 goal = has_goal ? sp.inv.xform(r_b.world) : Vector3();
 	Vector3 vel;
 	if (r_b.link_state == LINK_ON) {
 		on_link++;
 		const Vector3 from = EnemyLinks::at(r_b.motion, r_b.link_t);
 		r_b.link_t += p_dt;
 		const Vector3 to = EnemyLinks::at(r_b.motion, r_b.link_t);
-		p_body->set_global_position(root_xf.xform(to));
-		vel = root_xf.basis.xform(to - from) / p_dt;
-		_turn(r_b, p_body, root_xf.basis.xform(r_b.motion.b - r_b.motion.a), r_b.up, p_dt);
+		p_body->set_global_position(sp.xf.xform(to));
+		vel = sp.xf.basis.xform(to - from) / p_dt;
+		_turn(r_b, p_body, sp.xf.basis.xform(r_b.motion.b - r_b.motion.a), r_b.up, p_dt);
 		if (r_b.link_t >= r_b.motion.duration) {
-			if (crowd.is_valid() && crowd->count_near(r_b.motion.b, LAND_CLOSE_R, r_b.crowd) > 0) {
+			if (sp.crowd.is_valid() && sp.crowd->count_near(r_b.motion.b, LAND_CLOSE_R, r_b.crowd) > 0) {
 				land_close++;
 			}
 			_link_release(p_h, r_b);
@@ -138,8 +142,9 @@ void EnemyBodies::_link_release(int p_h, Body &r_b) {
 	if (links.valid(r_b.link)) {
 		links.release(r_b.link, p_h);
 	}
-	if (r_b.link_state == LINK_ON && crowd.is_valid() && r_b.crowd >= 0) {
-		crowd->agent_set_airborne(r_b.crowd, false);
-		crowd->agent_link_done(r_b.crowd);
+	EnemyWorld *c = _crowd(r_b); // Из _set_space — тело ещё в старом пространстве
+	if (r_b.link_state == LINK_ON && c != nullptr && r_b.crowd >= 0) {
+		c->agent_set_airborne(r_b.crowd, false);
+		c->agent_link_done(r_b.crowd);
 	}
 }

@@ -7,6 +7,7 @@
 #include "core/math/transform_3d.h"
 #include "core/object/object_id.h"
 #include "core/object/ref_counted.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
 #include "core/variant/type_info.h"
@@ -27,7 +28,9 @@ class Node3D;
 // скорости — покой: без move_and_slide, полный шаг раз в REST_CHECK_TICKS) → вход толпе, поза визуалу
 // (EnemyViews), поза тика для сети (net_pack). Бой и решения — у GDScript: тик возвращает события (пары «вид,
 // ручка»: клип замаха, удар, запрос пути в слот ходока, предметы у ног), их решает проход карты (EnemyPass).
-// Тела — CharacterBody3D (ObjectID; пропавшее тело пропускается). Координаты толпы — корня карты. Связи (план
+// Тела — CharacterBody3D (ObjectID; пропавшее тело пропускается). Координаты толпы — пространства тела (Space:
+// корень карты или подвижная ReferenceFrame; spec 2026-10-23-enemy-moving-spaces §3): пространство меняют правило
+// пола (луч вниз: тело опоры — владелец по set_floor_spaces) и телепорт (body_teleport). Связи (план
 // 2026-10-22-nav-links-b; enemy_bodies_links.cpp): у входа связи (толпа AGENT_LINK) — ждёт (закрыта, занята, место
 // приземления занято — копит закрытие), на связи — поза по траектории профиля без физики (оба яруса), приземлился —
 // LAND_S стоит; события — клип прыжка, закрыть / открыть связь (ручка — номер связи).
@@ -91,6 +94,11 @@ public:
 	static constexpr real_t LAND_CLOSE_R = 0.5f; // Приземлился ближе к другому — счётчик land_close (проба)
 	static constexpr real_t LAND_S = 0.25f; // После приземления стоит
 	static constexpr uint32_t LINK_LOG = 16; // Видов пройденных связей в журнале тела (пробы)
+	// Пространства (spec 2026-10-23-enemy-moving-spaces §3)
+	static constexpr uint64_t FLOOR_CHECK_TICKS = 9; // Правило пола: луч вниз раз в столько тиков (сдвиг по слоту) и при касании
+	static constexpr real_t FLOOR_RAY_UP = 0.3f; // Начало луча над ногами
+	static constexpr real_t FLOOR_RAY_DOWN = 0.5f; // Конец луча под ногами (длиннее прилипания 0.35)
+	static constexpr uint32_t FLOOR_LAYER = 1;
 
 private:
 	enum LinkState {
@@ -100,12 +108,21 @@ private:
 		LINK_LAND, // Приземлился (LAND_S)
 	};
 
+	struct Space {
+		Ref<EnemyWorld> crowd; // Толпа пространства (NavSpace.crowd)
+		ObjectID node_id; // Корень карты (пространство 0) или ReferenceFrame
+		bool frame = false; // Подвижное: поза — query_xform(), тело переносится с ним; корабль — поза узла, система тела — мир
+		bool ready = false; // Сетка собрана (NavSpace.is_ready)
+		Transform3D xf; // Поза этого тика (координаты толпы)
+		Transform3D inv;
+	};
+
 	struct Body {
 		bool used = false;
 		bool dead = false;
 		ObjectID body_id;
 		ObjectID zone_id;
-		ObjectID frame_id;
+		int space = 0; // Пространство тела (индекс в spaces)
 		Transform3D frame_last;
 		Vector3 up = Vector3(0.0f, 1.0f, 0.0f); // Верх тела (up_direction): у CharacterBody3D в C++ он приватный — держим здесь
 		int crowd = -1; // Ручка EnemyWorld
@@ -115,6 +132,7 @@ private:
 		// Движение
 		real_t yaw = 0.0f;
 		bool on_step = false;
+		bool was_floor = true; // На полу в прошлом тике (касание после полёта — проверка пола)
 		real_t lag_prev = 0.0f;
 		real_t lag_curr = 0.0f;
 		uint8_t tier = TIER_NEAR;
@@ -157,12 +175,10 @@ private:
 
 	LocalVector<Body> bodies;
 	LocalVector<int> free_handles;
-	Ref<EnemyWorld> crowd;
 	Ref<EnemyViews> views;
-	ObjectID root_id;
-	Transform3D root_xf;
-	Transform3D root_inv;
-	bool nav_ready = false;
+	LocalVector<Space> spaces; // 0 — корабль (корень карты)
+	HashMap<ObjectID, int> floor_space; // Тело пола -> пространство
+	int space_changes = 0;
 	int tier_override = -1;
 	real_t gravity = 9.8f;
 	RID query_sphere;
@@ -180,7 +196,11 @@ private:
 	int on_link = 0;
 
 	bool _valid(int p_h) const;
-	void _root_xforms();
+	void _space_xforms();
+	EnemyWorld *_crowd(const Body &p_b) const;
+	bool _nav_ok(const Body &p_b) const;
+	void _set_space(int p_h, Body &r_b, int p_space, CharacterBody3D *p_body);
+	bool _follow_floor(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now);
 	void _emit(int p_kind, int p_h);
 	void _tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt);
 	void _publish(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_vel, const Vector3 &p_goal, bool p_has_goal, uint64_t p_now);
@@ -220,18 +240,24 @@ protected:
 public:
 	~EnemyBodies();
 
-	// Толпа и сетка карты, визуал, корень карты (координаты толпы)
+	// Толпа корабля, визуал, корень карты (пространство 0)
 	void setup(const Ref<EnemyWorld> &p_crowd, const Ref<EnemyViews> &p_views, Node3D *p_root);
 	int body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_view, int p_slot, real_t p_speed, real_t p_yaw);
 	void body_remove(int p_h);
 	void body_kill(int p_h); // Смерть: толпа отпускает агента, вид выключен, тик пропускает тело
-	void body_set_frame(int p_h, Node3D *p_frame); // Система отсчёта (ReferenceFrame: query_xform), null — мир
+	int space_add(const Ref<EnemyWorld> &p_crowd, Node3D *p_frame); // Подвижное пространство (ReferenceFrame); индекс
+	void space_set_ready(int p_space, bool p_ready);
+	int get_space_count() const { return (int)spaces.size(); }
+	void set_floor_spaces(const PackedInt64Array &p_ids, const PackedInt32Array &p_spaces); // Тело пола (instance id) → пространство
+	int body_space(int p_h) const;
+	void body_teleport(int p_h, int p_space, const Transform3D &p_world); // Мгновенно в позу (мир) и в пространство
+	int get_space_changes() const { return space_changes; } // Смен пространства всего (пробы)
 	void body_set_point(int p_h, const Vector3 &p_world); // Точка пробы: идти туда без боя
 	void body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links = PackedInt32Array());
 	void body_set_profile(int p_h, real_t p_jump_impulse, real_t p_gravity); // Профиль навигации тела (связи)
 	PackedInt32Array body_link_log(int p_h) const; // Виды пройденных связей по порядку
 	int body_link_state(int p_h) const;
-	// Таблица связей карты (координаты корня; номер — NavLinkSet.links)
+	// Таблица связей карты (координаты пространства корабля; номер — NavLinkSet.links)
 	void set_links(const PackedVector3Array &p_starts, const PackedVector3Array &p_ends, const PackedInt32Array &p_kinds);
 	void body_add_hits(int p_h, int p_hits);
 	void body_set_net_id(int p_h, int p_net_id);
@@ -254,7 +280,7 @@ public:
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);
-	void set_nav_ready(bool p_ready);
+	void set_nav_ready(bool p_ready); // Сетка корабля (пространство 0)
 	void set_tier_override(int p_tier); // -1 — по расстоянию (пробы: TIER_NEAR / TIER_FAR)
 	PackedInt32Array tick(real_t p_delta); // События: пары (Event, ручка)
 	Array net_pack() const; // [тик, PackedInt32Array net id, PackedFloat32Array по 6 чисел: x, y, z, yaw, speed, step_lag]

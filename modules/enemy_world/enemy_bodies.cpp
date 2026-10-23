@@ -23,17 +23,62 @@ bool EnemyBodies::_valid(int p_h) const {
 }
 
 void EnemyBodies::setup(const Ref<EnemyWorld> &p_crowd, const Ref<EnemyViews> &p_views, Node3D *p_root) {
-	crowd = p_crowd;
 	views = p_views;
-	root_id = p_root ? p_root->get_instance_id() : ObjectID();
+	spaces.clear();
+	Space s;
+	s.crowd = p_crowd;
+	s.node_id = p_root ? p_root->get_instance_id() : ObjectID();
+	spaces.push_back(s);
 	gravity = GLOBAL_GET("physics/3d/default_gravity");
-	_root_xforms();
+	_space_xforms();
 }
 
-void EnemyBodies::_root_xforms() {
-	Node3D *root = Object::cast_to<Node3D>(ObjectDB::get_instance(root_id));
-	root_xf = root ? root->get_global_transform() : Transform3D();
-	root_inv = root_xf.affine_inverse();
+int EnemyBodies::space_add(const Ref<EnemyWorld> &p_crowd, Node3D *p_frame) {
+	ERR_FAIL_NULL_V(p_frame, -1);
+	ERR_FAIL_COND_V_MSG(spaces.is_empty(), -1, "EnemyBodies: setup first (space 0 — the ship).");
+	Space s;
+	s.crowd = p_crowd;
+	s.node_id = p_frame->get_instance_id();
+	s.frame = true;
+	spaces.push_back(s);
+	_space_xforms();
+	return (int)spaces.size() - 1;
+}
+
+void EnemyBodies::space_set_ready(int p_space, bool p_ready) {
+	ERR_FAIL_INDEX(p_space, (int)spaces.size());
+	spaces[p_space].ready = p_ready;
+}
+
+void EnemyBodies::set_floor_spaces(const PackedInt64Array &p_ids, const PackedInt32Array &p_spaces) {
+	ERR_FAIL_COND(p_ids.size() != p_spaces.size());
+	floor_space.clear();
+	for (int i = 0; i < p_ids.size(); i++) {
+		floor_space.insert(ObjectID((uint64_t)p_ids[i]), p_spaces[i]);
+	}
+}
+
+// Позы пространств этого тика: корабль — поза корня карты; подвижное — query_xform (согласована с запросами
+// физики тика, не зависит от порядка нод).
+void EnemyBodies::_space_xforms() {
+	for (Space &s : spaces) {
+		Object *o = ObjectDB::get_instance(s.node_id);
+		if (s.frame) {
+			s.xf = o ? (Transform3D)o->call(SNAME("query_xform")) : Transform3D();
+		} else {
+			Node3D *n = Object::cast_to<Node3D>(o);
+			s.xf = n ? n->get_global_transform() : Transform3D();
+		}
+		s.inv = s.xf.affine_inverse();
+	}
+}
+
+EnemyWorld *EnemyBodies::_crowd(const Body &p_b) const {
+	return p_b.space < (int)spaces.size() ? spaces[p_b.space].crowd.ptr() : nullptr; // Нет толпы — nullptr
+}
+
+bool EnemyBodies::_nav_ok(const Body &p_b) const {
+	return p_b.crowd >= 0 && p_b.space < (int)spaces.size() && spaces[p_b.space].ready && spaces[p_b.space].crowd.is_valid();
 }
 
 int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_view, int p_slot, real_t p_speed, real_t p_yaw) {
@@ -57,9 +102,10 @@ int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_vi
 	b.speed = p_speed;
 	b.yaw = p_yaw;
 	b.up = p_body->get(SNAME("up_direction"));
-	if (crowd.is_valid()) {
-		_root_xforms();
-		b.crowd = crowd->agent_add(root_inv.xform(p_body->get_global_position()));
+	// Новое тело — в пространстве корабля; в другое переведёт правило пола
+	if (!spaces.is_empty() && spaces[0].crowd.is_valid()) {
+		_space_xforms();
+		b.crowd = spaces[0].crowd->agent_add(spaces[0].inv.xform(p_body->get_global_position()));
 	}
 	return h;
 }
@@ -68,8 +114,9 @@ void EnemyBodies::body_remove(int p_h) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
 	_link_release(p_h, b);
-	if (crowd.is_valid() && b.crowd >= 0) {
-		crowd->agent_remove(b.crowd);
+	EnemyWorld *c = _crowd(b);
+	if (c != nullptr && b.crowd >= 0) {
+		c->agent_remove(b.crowd);
 	}
 	b = Body();
 	free_handles.push_back(p_h);
@@ -86,8 +133,9 @@ void EnemyBodies::body_kill(int p_h) {
 	_link_release(p_h, b);
 	b.link_state = LINK_NONE;
 	b.link = -1;
-	if (crowd.is_valid() && b.crowd >= 0) {
-		crowd->agent_remove(b.crowd);
+	EnemyWorld *c = _crowd(b);
+	if (c != nullptr && b.crowd >= 0) {
+		c->agent_remove(b.crowd);
 		b.crowd = -1;
 	}
 	if (views.is_valid() && b.view >= 0) {
@@ -95,12 +143,88 @@ void EnemyBodies::body_kill(int p_h) {
 	}
 }
 
-// Смена системы: тело остаётся на месте в мире, перенос считается от позы новой системы (FrameBody.frame).
-void EnemyBodies::body_set_frame(int p_h, Node3D *p_frame) {
+// Смена пространства: тело на месте в мире; толпа старого отпускает агента, новая берёт (путь — заново); поза тела —
+// базис системы нового (как PlayerFrame.switch_to), взгляд в мире тот же; связь отпускается.
+void EnemyBodies::_set_space(int p_h, Body &r_b, int p_space, CharacterBody3D *p_body) {
+	_link_release(p_h, r_b);
+	r_b.link_state = LINK_NONE;
+	r_b.link = -1;
+	EnemyWorld *old = _crowd(r_b);
+	if (old != nullptr && r_b.crowd >= 0) {
+		old->agent_remove(r_b.crowd);
+	}
+	r_b.crowd = -1;
+	const Vector3 fwd = _forward(r_b, r_b.frame_last); // Взгляд (мир) до смены
+	r_b.space = p_space;
+	const Space &sp = spaces[p_space];
+	const Vector3 pos = p_body->get_global_position();
+	if (sp.crowd.is_valid()) {
+		r_b.crowd = sp.crowd->agent_add(sp.inv.xform(pos));
+	}
+	r_b.frame_last = _frame_xform(r_b);
+	const Vector3 vel = p_body->get_velocity();
+	p_body->set_global_transform(Transform3D(r_b.frame_last.basis, pos));
+	p_body->set_velocity(vel);
+	r_b.up = r_b.frame_last.basis.get_column(1).normalized();
+	p_body->set(SNAME("up_direction"), r_b.up);
+	const Vector3 fl = r_b.frame_last.basis.xform_inv(fwd);
+	r_b.yaw = Math::atan2(-fl.x, -fl.z);
+	r_b.hint = -1;
+	space_changes++;
+}
+
+// Правило пола (spec §3): пространство тела — владелец тела опоры под ногами (set_floor_spaces); луч вниз — в тик
+// касания после полёта и раз в FLOOR_CHECK_TICKS (сдвиг по слоту). Опора не из таблицы (предмет, игрок, ходок) —
+// без смены. true — пространство сменилось.
+bool EnemyBodies::_follow_floor(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now) {
+	const bool on = p_body->is_on_floor();
+	const bool landed = on && !r_b.was_floor;
+	r_b.was_floor = on;
+	if (!on || (!landed && (p_now + (uint64_t)r_b.slot) % FLOOR_CHECK_TICKS != 0) || floor_space.is_empty()) {
+		return false;
+	}
+	const Vector3 pos = p_body->get_global_position();
+	PhysicsDirectSpaceState3D::RayParameters rq;
+	rq.from = pos + r_b.up * FLOOR_RAY_UP;
+	rq.to = pos - r_b.up * FLOOR_RAY_DOWN;
+	rq.collision_mask = FLOOR_LAYER;
+	rq.exclude.insert(p_body->get_rid());
+	PhysicsDirectSpaceState3D::RayResult hit;
+	if (!p_body->get_world_3d()->get_direct_space_state()->intersect_ray(rq, hit)) {
+		return false;
+	}
+	const int *s = floor_space.getptr(hit.collider_id);
+	if (s == nullptr || *s == r_b.space || *s < 0 || *s >= (int)spaces.size()) {
+		return false;
+	}
+	_set_space(p_h, r_b, *s, p_body);
+	return true;
+}
+
+void EnemyBodies::body_teleport(int p_h, int p_space, const Transform3D &p_world) {
 	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_space, (int)spaces.size());
 	Body &b = bodies[p_h];
-	b.frame_id = p_frame ? p_frame->get_instance_id() : ObjectID();
-	b.frame_last = _frame_xform(b);
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	ERR_FAIL_NULL(body);
+	_space_xforms(); // Вызов из физ-тика площадки — поза пространства этого тика
+	body->set_global_position(p_world.origin);
+	body->set_velocity(Vector3());
+	_set_space(p_h, b, p_space, body);
+	const Vector3 f = b.frame_last.basis.xform_inv(-p_world.basis.get_column(2)); // Взгляд по −Z цели в системе
+	b.yaw = Math::atan2(-f.x, -f.z);
+	b.on_step = false;
+	b.lag_prev = 0.0f;
+	b.lag_curr = 0.0f;
+	b.was_floor = false; // Касание после переноса — проверка пола
+	if (views.is_valid() && b.view >= 0) {
+		views->view_reset(b.view);
+	}
+}
+
+int EnemyBodies::body_space(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), 0);
+	return bodies[p_h].space;
 }
 
 void EnemyBodies::body_set_point(int p_h, const Vector3 &p_world) {
@@ -115,8 +239,9 @@ void EnemyBodies::body_set_point(int p_h, const Vector3 &p_world) {
 void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links) {
 	ERR_FAIL_COND(!_valid(p_h));
 	const Body &b = bodies[p_h];
-	if (crowd.is_valid() && b.crowd >= 0) {
-		crowd->agent_set_path(b.crowd, p_points, p_target, p_links);
+	EnemyWorld *c = _crowd(b);
+	if (c != nullptr && b.crowd >= 0) {
+		c->agent_set_path(b.crowd, p_points, p_target, p_links);
 	}
 }
 
@@ -200,10 +325,11 @@ int EnemyBodies::body_path_requests(int p_h) const {
 Vector3i EnemyBodies::body_crowd_stats(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), Vector3i());
 	const Body &b = bodies[p_h];
-	if (!crowd.is_valid() || b.crowd < 0) {
+	EnemyWorld *c = _crowd(b);
+	if (c == nullptr || b.crowd < 0) {
 		return b.dead_stats;
 	}
-	return Vector3i(crowd->agent_stuck_total(b.crowd), crowd->agent_blocked_total(b.crowd), crowd->agent_yield_total(b.crowd));
+	return Vector3i(c->agent_stuck_total(b.crowd), c->agent_blocked_total(b.crowd), c->agent_yield_total(b.crowd));
 }
 
 int64_t EnemyBodies::body_net_tick(int p_h) const {
@@ -227,7 +353,7 @@ void EnemyBodies::set_players(const PackedVector3Array &p_pos, const PackedByteA
 }
 
 void EnemyBodies::set_nav_ready(bool p_ready) {
-	nav_ready = p_ready;
+	space_set_ready(0, p_ready);
 }
 
 void EnemyBodies::set_tier_override(int p_tier) {
@@ -245,7 +371,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	tier_counts[TIER_NEAR] = 0;
 	tier_counts[TIER_FAR] = 0;
 	rest_count = 0;
-	_root_xforms();
+	_space_xforms();
 	_links_tick(p_delta);
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
@@ -265,35 +391,37 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 
 // Порядок — EnemyWalker._physics_process (до этапа 2); связь — своя ветка (enemy_bodies_links.cpp).
 void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt) {
-	const Transform3D fx = _carry(r_b, p_body);
+	Transform3D fx = _carry(r_b, p_body);
 	if (r_b.link_state == LINK_ON || r_b.link_state == LINK_LAND) {
 		_link_move(p_h, r_b, p_body, fx, p_now, p_dt);
 		return;
 	}
+	const Space &sp = spaces[r_b.space]; // Пространство на начало тика (правило пола меняет его после шага)
 	Vector3 want; // Мир
 	uint8_t st = EnemyWorld::AGENT_IDLE;
 	bool has_goal = false;
-	Vector3 goal; // Корень карты
+	Vector3 goal; // Пространство тела
 	_brain(p_h, r_b, p_body, fx, p_now);
-	if (crowd.is_valid() && r_b.crowd >= 0 && nav_ready) {
+	if (_nav_ok(r_b)) {
+		EnemyWorld *c = _crowd(r_b);
 		if (r_b.moving) {
 			has_goal = true;
-			goal = root_inv.xform(r_b.world);
+			goal = sp.inv.xform(r_b.world);
 		}
-		const Vector3 w = crowd->agent_velocity(r_b.crowd); // По входам на начало тика
-		st = (uint8_t)crowd->agent_state(r_b.crowd);
-		const int at_link = st == EnemyWorld::AGENT_LINK ? crowd->agent_link(r_b.crowd) : -1;
+		const Vector3 w = c->agent_velocity(r_b.crowd); // По входам на начало тика
+		st = (uint8_t)c->agent_state(r_b.crowd);
+		const int at_link = st == EnemyWorld::AGENT_LINK ? c->agent_link(r_b.crowd) : -1;
 		// Переспросить путь: толпа хочет; у входа закрытой связи; связь закрылась / открылась (стоящие)
-		const bool repath = crowd->agent_wants_path(r_b.crowd) || (links.valid(at_link) && links.closed(at_link)) ||
+		const bool repath = c->agent_wants_path(r_b.crowd) || (links.valid(at_link) && links.closed(at_link)) ||
 				(r_b.path_epoch != nav_epoch && (st == EnemyWorld::AGENT_HOLD || st == EnemyWorld::AGENT_LINK));
 		if (has_goal && repath && (p_now + (uint64_t)r_b.slot) % PATH_SLOTS == 0) {
-			r_b.path_from = root_inv.xform(p_body->get_global_position());
+			r_b.path_from = sp.inv.xform(p_body->get_global_position());
 			r_b.goal = goal;
 			r_b.path_requests++;
 			r_b.path_epoch = nav_epoch;
 			_emit(EVENT_PATH, p_h);
 		}
-		want = root_xf.basis.xform(w);
+		want = sp.xf.basis.xform(w);
 	}
 	if (st == EnemyWorld::AGENT_LINK && has_goal) {
 		_link_wait(p_h, r_b, p_body, p_now, p_dt); // Ушёл на связь — двигается со следующего тика
@@ -306,7 +434,7 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	const bool hold = st == EnemyWorld::AGENT_HOLD; // Стоит в толпе — лицом к цели, не по толчкам соседей
 	Vector3 face = (r_b.moving && !hold && want.length() > FACE_MOVE_SPEED) ? want : look - pos0;
 	if (r_b.link_state != LINK_NONE && links.valid(r_b.link)) {
-		face = root_xf.xform(links.end(r_b.link)) - pos0; // У входа связи — лицом к её концу
+		face = spaces[0].xf.xform(links.end(r_b.link)) - pos0; // У входа связи — лицом к её концу (связи — корабль)
 	}
 	_update_tier(r_b, pos0);
 	Vector3 vel;
@@ -318,6 +446,10 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 		_turn(r_b, p_body, face, r_b.up, p_dt);
 	} else {
 		_move_near(r_b, p_body, want, face, p_dt);
+		if (_follow_floor(p_h, r_b, p_body, p_now)) { // Пространство сменилось: цель и система — нового
+			fx = r_b.frame_last;
+			goal = spaces[r_b.space].inv.xform(r_b.world);
+		}
 		vel = p_body->get_real_velocity();
 		Area3D *zone = Object::cast_to<Area3D>(ObjectDB::get_instance(r_b.zone_id));
 		if (zone != nullptr && zone->has_overlapping_bodies()) {
@@ -332,8 +464,9 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 // Конец тика тела: вход толпе, поза и шаг визуалу, поза тика сети, счётчик яруса.
 void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_vel, const Vector3 &p_goal, bool p_has_goal, uint64_t p_now) {
 	const Vector3 pos = p_body->get_global_position();
-	if (crowd.is_valid() && r_b.crowd >= 0) {
-		crowd->agent_commit(r_b.crowd, root_inv.xform(pos), p_goal, p_has_goal, r_b.stop_dist, r_b.speed);
+	EnemyWorld *c = _crowd(r_b);
+	if (c != nullptr && r_b.crowd >= 0) {
+		c->agent_commit(r_b.crowd, spaces[r_b.space].inv.xform(pos), p_goal, p_has_goal, r_b.stop_dist, r_b.speed);
 	}
 	const Basis torso = p_fx.basis * Basis(UP_AXIS, r_b.yaw);
 	r_b.view_speed = p_vel.dot(torso.xform(Vector3(0.0f, 0.0f, -1.0f)));
@@ -345,12 +478,12 @@ void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D
 	tier_counts[r_b.tier]++;
 }
 
+// Система тела: подвижное пространство — его поза этого тика; корабль — мир.
 Transform3D EnemyBodies::_frame_xform(const Body &p_b) const {
-	if (p_b.frame_id.is_null()) {
+	if (p_b.space >= (int)spaces.size() || !spaces[p_b.space].frame) {
 		return Transform3D();
 	}
-	Object *f = ObjectDB::get_instance(p_b.frame_id);
-	return f ? (Transform3D)f->call(SNAME("query_xform")) : Transform3D();
+	return spaces[p_b.space].xf;
 }
 
 // Начало тика тела: перенос вместе с системой (FrameBody.carry). Возвращает позу системы этого тика.
@@ -493,7 +626,7 @@ void EnemyBodies::_update_tier(Body &r_b, const Vector3 &p_pos) {
 		r_b.tier = (uint8_t)tier_override;
 		return;
 	}
-	if (!nav_ready || !crowd.is_valid() || players_pos.is_empty()) {
+	if (!_nav_ok(r_b) || players_pos.is_empty()) {
 		r_b.tier = TIER_NEAR;
 		return;
 	}
@@ -553,9 +686,11 @@ Vector3 EnemyBodies::_move_far(Body &r_b, CharacterBody3D *p_body, const Vector3
 	const Vector3 want_h = p_want - up * p_want.dot(up);
 	const Vector3 v_h = (v - up * v.dot(up)).move_toward(want_h, ACCEL * p_dt);
 	const Vector3 next = p_body->get_global_position() + v_h * p_dt;
-	const Vector3 on = crowd->column(root_inv.xform(next), r_b.hint);
-	r_b.hint = crowd->get_column_poly();
-	p_body->set_global_position(root_xf.xform(on));
+	EnemyWorld *c = _crowd(r_b);
+	const Space &sp = spaces[r_b.space];
+	const Vector3 on = c->column(sp.inv.xform(next), r_b.hint);
+	r_b.hint = c->get_column_poly();
+	p_body->set_global_position(sp.xf.xform(on));
 	p_body->set_velocity(v_h);
 	r_b.on_step = false;
 	_lag(r_b, 0.0f, p_dt);
@@ -751,7 +886,13 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_add", "body", "item_zone", "view", "slot", "speed", "yaw"), &EnemyBodies::body_add);
 	ClassDB::bind_method(D_METHOD("body_remove", "handle"), &EnemyBodies::body_remove);
 	ClassDB::bind_method(D_METHOD("body_kill", "handle"), &EnemyBodies::body_kill);
-	ClassDB::bind_method(D_METHOD("body_set_frame", "handle", "frame"), &EnemyBodies::body_set_frame);
+	ClassDB::bind_method(D_METHOD("space_add", "crowd", "frame"), &EnemyBodies::space_add);
+	ClassDB::bind_method(D_METHOD("space_set_ready", "space", "ready"), &EnemyBodies::space_set_ready);
+	ClassDB::bind_method(D_METHOD("get_space_count"), &EnemyBodies::get_space_count);
+	ClassDB::bind_method(D_METHOD("set_floor_spaces", "ids", "spaces"), &EnemyBodies::set_floor_spaces);
+	ClassDB::bind_method(D_METHOD("body_space", "handle"), &EnemyBodies::body_space);
+	ClassDB::bind_method(D_METHOD("body_teleport", "handle", "space", "world"), &EnemyBodies::body_teleport);
+	ClassDB::bind_method(D_METHOD("get_space_changes"), &EnemyBodies::get_space_changes);
 	ClassDB::bind_method(D_METHOD("body_set_point", "handle", "world"), &EnemyBodies::body_set_point);
 	ClassDB::bind_method(D_METHOD("body_set_path", "handle", "points", "target", "links"), &EnemyBodies::body_set_path, DEFVAL(PackedInt32Array()));
 	ClassDB::bind_method(D_METHOD("body_set_profile", "handle", "jump_impulse", "gravity"), &EnemyBodies::body_set_profile);

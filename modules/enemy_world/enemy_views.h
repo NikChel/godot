@@ -84,6 +84,7 @@ public:
 	void view_remove(int p_h);
 	void view_commit(int p_h, const Transform3D &p_pose, real_t p_step_lag, real_t p_speed);
 	void view_set_active(int p_h, bool p_active);
+	void view_reset(int p_h); // Следующая поза — без интерполяции (телепорт)
 	void view_play_action(int p_h, const StringName &p_clip);
 	bool view_is_acting(int p_h) const;
 	void frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta);

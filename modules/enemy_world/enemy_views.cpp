@@ -112,6 +112,11 @@ void EnemyViews::view_set_active(int p_h, bool p_active) {
 	anim_dt[p_h] = 0.0f;
 }
 
+void EnemyViews::view_reset(int p_h) {
+	ERR_FAIL_COND(!_valid(p_h));
+	has_pose[p_h] = 0;
+}
+
 void EnemyViews::view_play_action(int p_h, const StringName &p_clip) {
 	ERR_FAIL_COND(!_valid(p_h));
 	AnimationPlayer *player = ObjectDB::get_instance<AnimationPlayer>(player_id[p_h]);
@@ -213,6 +218,7 @@ void EnemyViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("view_remove", "handle"), &EnemyViews::view_remove);
 	ClassDB::bind_method(D_METHOD("view_commit", "handle", "pose", "step_lag", "speed"), &EnemyViews::view_commit);
 	ClassDB::bind_method(D_METHOD("view_set_active", "handle", "active"), &EnemyViews::view_set_active);
+	ClassDB::bind_method(D_METHOD("view_reset", "handle"), &EnemyViews::view_reset);
 	ClassDB::bind_method(D_METHOD("view_play_action", "handle", "clip"), &EnemyViews::view_play_action);
 	ClassDB::bind_method(D_METHOD("view_is_acting", "handle"), &EnemyViews::view_is_acting);
 	ClassDB::bind_method(D_METHOD("frame", "alpha", "camera", "delta"), &EnemyViews::frame);
