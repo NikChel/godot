@@ -49,6 +49,8 @@ int EnemyViews::view_add(Node3D *p_root, AnimationPlayer *p_player) {
 		player_id.resize(n);
 		pose_prev.resize(n);
 		pose_curr.resize(n);
+		space_prev.resize(n);
+		space_curr.resize(n);
 		lag_prev.resize(n);
 		lag_curr.resize(n);
 		speed.resize(n);
@@ -64,6 +66,8 @@ int EnemyViews::view_add(Node3D *p_root, AnimationPlayer *p_player) {
 	player_id[h] = p_player->get_instance_id();
 	pose_prev[h] = Transform3D();
 	pose_curr[h] = Transform3D();
+	space_prev[h] = -1;
+	space_curr[h] = -1;
 	lag_prev[h] = 0.0f;
 	lag_curr[h] = 0.0f;
 	speed[h] = 0.0f;
@@ -88,19 +92,48 @@ void EnemyViews::view_remove(int p_h) {
 	free_handles.push_back(p_h);
 }
 
-void EnemyViews::view_commit(int p_h, const Transform3D &p_pose, real_t p_step_lag, real_t p_speed) {
+void EnemyViews::view_commit(int p_h, const Transform3D &p_pose, real_t p_step_lag, real_t p_speed, int p_space) {
 	ERR_FAIL_COND(!_valid(p_h));
 	if (has_pose[p_h]) {
 		pose_prev[p_h] = pose_curr[p_h];
+		space_prev[p_h] = space_curr[p_h];
 		lag_prev[p_h] = lag_curr[p_h];
 	} else {
 		pose_prev[p_h] = p_pose;
+		space_prev[p_h] = p_space;
 		lag_prev[p_h] = p_step_lag;
 		has_pose[p_h] = 1;
 	}
 	pose_curr[p_h] = p_pose;
+	space_curr[p_h] = p_space;
 	lag_curr[p_h] = p_step_lag;
 	speed[p_h] = p_speed;
+}
+
+void EnemyViews::set_root(Node3D *p_root) {
+	ERR_FAIL_NULL(p_root);
+	spaces.clear();
+	Space s;
+	s.node_id = p_root->get_instance_id();
+	spaces.push_back(s);
+}
+
+int EnemyViews::space_add(Node3D *p_frame) {
+	ERR_FAIL_NULL_V(p_frame, -1);
+	ERR_FAIL_COND_V_MSG(spaces.is_empty(), -1, "EnemyViews: set_root first (space 0 — the map root).");
+	Space s;
+	s.node_id = p_frame->get_instance_id();
+	s.frame = true;
+	spaces.push_back(s);
+	return (int)spaces.size() - 1;
+}
+
+// Поза кадра пространства; −1 или реестра нет — мир, номер вне реестра — корень (0).
+Transform3D EnemyViews::_space_xf(int p_space) const {
+	if (p_space < 0 || spaces.is_empty()) {
+		return Transform3D();
+	}
+	return spaces[p_space < (int)spaces.size() ? p_space : 0].xf;
 }
 
 void EnemyViews::view_set_active(int p_h, bool p_active) {
@@ -139,6 +172,15 @@ void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) 
 	for (int &c : tier_counts) {
 		c = 0;
 	}
+	for (Space &s : spaces) {
+		Object *o = ObjectDB::get_instance(s.node_id);
+		if (s.frame) {
+			s.xf = o ? (Transform3D)o->call(SNAME("render_xform"), p_alpha) : Transform3D();
+		} else {
+			Node3D *n = Object::cast_to<Node3D>(o);
+			s.xf = n ? n->get_global_transform() : Transform3D();
+		}
+	}
 	for (uint32_t i = 0; i < used.size(); i++) {
 		if (!used[i]) {
 			continue;
@@ -152,7 +194,12 @@ void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) 
 		if (root == nullptr || player == nullptr) {
 			continue;
 		}
-		Transform3D xf = pose_prev[i].interpolate_with(pose_curr[i], p_alpha);
+		Transform3D xf;
+		if (space_prev[i] == space_curr[i]) {
+			xf = _space_xf(space_curr[i]) * pose_prev[i].interpolate_with(pose_curr[i], p_alpha);
+		} else {
+			xf = (_space_xf(space_prev[i]) * pose_prev[i]).interpolate_with(_space_xf(space_curr[i]) * pose_curr[i], p_alpha);
+		}
 		xf.origin -= xf.basis.get_column(1).normalized() * Math::lerp(lag_prev[i], lag_curr[i], p_alpha);
 		root->set_global_transform(xf);
 		const int t = tier_override >= 0 ? tier_override : _tier_for(tier[i], xf.origin.distance_to(p_camera));
@@ -216,7 +263,10 @@ void EnemyViews::set_tier_override(int p_tier) {
 void EnemyViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("view_add", "root", "player"), &EnemyViews::view_add);
 	ClassDB::bind_method(D_METHOD("view_remove", "handle"), &EnemyViews::view_remove);
-	ClassDB::bind_method(D_METHOD("view_commit", "handle", "pose", "step_lag", "speed"), &EnemyViews::view_commit);
+	ClassDB::bind_method(D_METHOD("view_commit", "handle", "pose", "step_lag", "speed", "space"), &EnemyViews::view_commit, DEFVAL(-1));
+	ClassDB::bind_method(D_METHOD("set_root", "root"), &EnemyViews::set_root);
+	ClassDB::bind_method(D_METHOD("space_add", "frame"), &EnemyViews::space_add);
+	ClassDB::bind_method(D_METHOD("get_space_count"), &EnemyViews::get_space_count);
 	ClassDB::bind_method(D_METHOD("view_set_active", "handle", "active"), &EnemyViews::view_set_active);
 	ClassDB::bind_method(D_METHOD("view_reset", "handle"), &EnemyViews::view_reset);
 	ClassDB::bind_method(D_METHOD("view_play_action", "handle", "clip"), &EnemyViews::view_play_action);

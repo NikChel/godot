@@ -187,14 +187,20 @@ bool EnemyReplicas::_sample(Replica &r_r, const double *p_times, double p_seek) 
 	return true;
 }
 
-// Соседние точки разных пространств — без смешения: до времени b — a, с него — b.
+// Соседние точки разных пространств — без смешения координат: позиция — у каждой своя (в мир — в тике, позой своего
+// пространства), пространство выборки — ближайшей по времени точки.
 void EnemyReplicas::_take(Replica &r_r, int p_a, int p_b, real_t p_f) {
 	const float *a = r_r.d + p_a * F;
 	const float *b = r_r.d + p_b * F;
-	if (a[6] != b[6]) {
-		p_f = p_f < 1.0f ? 0.0f : 1.0f;
+	r_r.cross = a[6] != b[6];
+	if (r_r.cross) {
+		r_r.pos_a = Vector3(a[0], a[1], a[2]);
+		r_r.pos_b = Vector3(b[0], b[1], b[2]);
+		r_r.space_a = (int)a[6];
+		r_r.space_b = (int)b[6];
+		r_r.cross_f = p_f;
 	}
-	r_r.space = (int)(p_f < 1.0f ? a[6] : b[6]);
+	r_r.space = (int)(p_f < 0.5f ? a[6] : b[6]);
 	r_r.pos = Vector3(Math::lerp(a[0], b[0], p_f), Math::lerp(a[1], b[1], p_f), Math::lerp(a[2], b[2], p_f));
 	r_r.yaw = Math::lerp_angle(a[3], b[3], p_f);
 	r_r.speed = Math::lerp(a[4], b[4], p_f);
@@ -241,8 +247,8 @@ real_t EnemyReplicas::replica_step_lag(int p_h) const {
 	return reps[p_h].step_lag;
 }
 
-// Физ-тик копий: позы пространств этого тика; поза показа — в мир позой своего пространства — в тело, поза визуалу
-// (базис — пространства × взгляд), наступившие события.
+// Физ-тик копий: позы пространств этого тика; поза показа — в мир позой своего пространства — в тело; визуалу — в
+// системе пространства (переход — в мире); наступившие события.
 PackedInt32Array EnemyReplicas::tick(double p_seek) {
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
 	due_handles.clear();
@@ -256,11 +262,17 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		Node3D *body = r.body_id.is_valid() ? Object::cast_to<Node3D>(ObjectDB::get_instance(r.body_id)) : nullptr;
 		const bool sampled = body != nullptr && _sample(r, r.t_local, p_seek);
 		const Transform3D xf = _space_xf(r.space);
+		const Vector3 world = r.cross ? _space_xf(r.space_a).xform(r.pos_a).lerp(_space_xf(r.space_b).xform(r.pos_b), r.cross_f) : xf.xform(r.pos);
 		if (sampled) {
-			body->set_global_position(xf.xform(r.pos));
+			body->set_global_position(world);
 		}
-		if (body != nullptr && views.is_valid() && r.view >= 0) {
-			views->view_commit(r.view, Transform3D(xf.basis * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw), body->get_global_position()), r.step_lag, r.speed);
+		if (sampled && views.is_valid() && r.view >= 0) {
+			const Basis yaw(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
+			if (r.cross) {
+				views->view_commit(r.view, Transform3D(xf.basis * yaw, world), r.step_lag, r.speed, -1);
+			} else {
+				views->view_commit(r.view, Transform3D(yaw, r.pos), r.step_lag, r.speed, r.space);
+			}
 		}
 		StringName e = _pop_due(r, p_seek);
 		while (e != NONE_EVENT) {

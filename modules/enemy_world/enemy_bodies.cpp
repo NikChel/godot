@@ -484,11 +484,11 @@ void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D
 	}
 	const Basis torso = p_fx.basis * Basis(UP_AXIS, r_b.yaw);
 	r_b.view_speed = p_vel.dot(torso.xform(Vector3(0.0f, 0.0f, -1.0f)));
-	if (views.is_valid() && r_b.view >= 0) {
-		views->view_commit(r_b.view, Transform3D(torso, pos), r_b.lag_curr, r_b.view_speed);
-	}
 	r_b.net_tick = (int64_t)p_now;
 	r_b.net_pos = p_fx.affine_inverse().xform(pos);
+	if (views.is_valid() && r_b.view >= 0) { // Визуалу — в системе пространства (кадр ставит позой кадра системы)
+		views->view_commit(r_b.view, Transform3D(Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.view_speed, r_b.space);
+	}
 	tier_counts[r_b.tier]++;
 }
 

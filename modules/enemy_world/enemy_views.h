@@ -10,9 +10,11 @@ class AnimationPlayer;
 class Node3D;
 
 // Визуал врагов карты (этап 3 EnemyWorld; план docs/superpowers/plans/2026-10-21-enemy-world-stage3-anim.md):
-// один проход кадра рендера на всех (AGENTS §2.9). Тик врага сдаёт позу (view_commit: тело в мире с базисом
-// торса, отставание подъёма на ступень, скорость вдоль торса); кадр (frame) ставит аватар между двумя
-// последними тиками минус отставание, выбирает уровень по расстоянию до камеры (гистерезис TIER_HYST) и
+// один проход кадра рендера на всех (AGENTS §2.9). Тик врага сдаёт позу (view_commit: тело с базисом торса в
+// системе пространства — корень карты set_root, подвижные системы space_add; −1 — в мире; отставание подъёма на
+// ступень, скорость вдоль торса); кадр (frame) ставит аватар между двумя последними тиками в позе пространства
+// кадра (render_xform системы — как кабина и игрок в ней; spec 2026-10-23-enemy-moving-spaces §6; тики разных
+// пространств — смешение в мире) минус отставание, выбирает уровень по расстоянию до камеры (гистерезис TIER_HYST) и
 // клип модели (стойка / шаг, гистерезис WALK_ON / WALK_OFF, темп — как AvatarAnimator игрока) и шагает
 // AnimationPlayer (режим MANUAL) накопленным временем: NEAR — каждый кадр, MID — раз в MID_EVERY, FAR — раз
 // в FAR_EVERY кадров (кадры шага раскиданы по ручкам). Поза — каждый кадр у всех. Пишет только аватары,
@@ -55,6 +57,15 @@ private:
 	LocalVector<ObjectID> player_id;
 	LocalVector<Transform3D> pose_prev;
 	LocalVector<Transform3D> pose_curr;
+	LocalVector<int> space_prev; // Пространство позы (−1 — мир)
+	LocalVector<int> space_curr;
+
+	struct Space {
+		ObjectID node_id;
+		bool frame = false; // Подвижная система (render_xform); нет — корень карты (global_transform)
+		Transform3D xf; // Поза кадра
+	};
+	LocalVector<Space> spaces;
 	LocalVector<real_t> lag_prev;
 	LocalVector<real_t> lag_curr;
 	LocalVector<real_t> speed;
@@ -75,6 +86,7 @@ private:
 	static real_t _walk_rate(real_t p_speed);
 	static int _tier_for(int p_tier, real_t p_dist);
 	bool _valid(int p_h) const;
+	Transform3D _space_xf(int p_space) const;
 
 protected:
 	static void _bind_methods();
@@ -82,7 +94,10 @@ protected:
 public:
 	int view_add(Node3D *p_root, AnimationPlayer *p_player);
 	void view_remove(int p_h);
-	void view_commit(int p_h, const Transform3D &p_pose, real_t p_step_lag, real_t p_speed);
+	void view_commit(int p_h, const Transform3D &p_pose, real_t p_step_lag, real_t p_speed, int p_space = -1);
+	void set_root(Node3D *p_root); // Пространство 0 — корень карты (сбрасывает реестр)
+	int space_add(Node3D *p_frame); // Подвижная система (ReferenceFrame: render_xform) — следующий номер
+	int get_space_count() const { return (int)spaces.size(); }
 	void view_set_active(int p_h, bool p_active);
 	void view_reset(int p_h); // Следующая поза — без интерполяции (телепорт)
 	void view_play_action(int p_h, const StringName &p_clip);
