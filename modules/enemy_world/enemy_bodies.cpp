@@ -134,6 +134,7 @@ void EnemyBodies::body_kill(int p_h) {
 	_link_release(p_h, b);
 	b.link_state = LINK_NONE;
 	b.link = -1;
+	b.portal_space = -1;
 	EnemyWorld *c = _crowd(b);
 	if (c != nullptr && b.crowd >= 0) {
 		c->agent_remove(b.crowd);
@@ -214,6 +215,7 @@ void EnemyBodies::body_teleport(int p_h, int p_space, const Transform3D &p_world
 	body->set_global_position(p_world.origin);
 	body->set_velocity(Vector3());
 	_set_space(p_h, b, p_space, body);
+	b.portal_space = -1;
 	const Vector3 f = b.frame_last.basis.xform_inv(-p_world.basis.get_column(2)); // Взгляд по −Z цели в системе
 	b.yaw = Math::atan2(-f.x, -f.z);
 	b.on_step = false;
@@ -237,6 +239,15 @@ void EnemyBodies::body_set_point(int p_h, const Vector3 &p_world) {
 	b.world = p_world;
 	b.stop_dist = POINT_STOP;
 	b.moving = true;
+}
+
+void EnemyBodies::body_clear_point(int p_h) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Body &b = bodies[p_h];
+	b.point_set = false;
+	b.moving = false;
+	b.stop_dist = STRIKE_STOP;
+	b.brain = BRAIN_IDLE;
 }
 
 void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links) {
@@ -901,6 +912,11 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_set_profile", "handle", "jump_impulse", "gravity"), &EnemyBodies::body_set_profile);
 	ClassDB::bind_method(D_METHOD("body_link_log", "handle"), &EnemyBodies::body_link_log);
 	ClassDB::bind_method(D_METHOD("body_link_state", "handle"), &EnemyBodies::body_link_state);
+	ClassDB::bind_method(D_METHOD("body_portal", "handle", "end", "kind", "space"), &EnemyBodies::body_portal);
+	ClassDB::bind_method(D_METHOD("body_clear_point", "handle"), &EnemyBodies::body_clear_point);
+	ClassDB::bind_method(D_METHOD("get_portal_transits"), &EnemyBodies::get_portal_transits);
+	ClassDB::bind_static_method("EnemyBodies", D_METHOD("motion_time", "kind", "a", "b", "walk", "impulse", "gravity"), &EnemyBodies::motion_time);
+	ClassDB::bind_static_method("EnemyBodies", D_METHOD("motion_kind", "kind", "a", "b", "impulse", "gravity"), &EnemyBodies::motion_kind);
 	ClassDB::bind_method(D_METHOD("set_links", "starts", "ends", "kinds"), &EnemyBodies::set_links);
 	ClassDB::bind_method(D_METHOD("body_add_hits", "handle", "hits"), &EnemyBodies::body_add_hits);
 	ClassDB::bind_method(D_METHOD("body_set_net_id", "handle", "net_id"), &EnemyBodies::body_set_net_id);

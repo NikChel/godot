@@ -167,6 +167,7 @@ private:
 		int link = -1; // Номер связи (ждёт у входа / на ней)
 		EnemyLinks::Motion motion;
 		real_t link_t = 0.0f;
+		int portal_space = -1; // Касание после полёта портала — в это пространство
 		uint64_t land_end = 0;
 		real_t jump_impulse = 4.2f; // Профиль тела (NavMoveProfile)
 		real_t jump_gravity = 9.8f;
@@ -195,6 +196,7 @@ private:
 	int traversals = 0;
 	int land_close = 0;
 	int on_link = 0;
+	int portal_transits = 0;
 
 	bool _valid(int p_h) const;
 	void _space_xforms();
@@ -258,6 +260,13 @@ public:
 	void body_set_profile(int p_h, real_t p_jump_impulse, real_t p_gravity); // Профиль навигации тела (связи)
 	PackedInt32Array body_link_log(int p_h) const; // Виды пройденных связей по порядку
 	int body_link_state(int p_h) const;
+	// Переход через портал (spec 2026-10-23-enemy-moving-spaces §3): полёт в пространстве корабля по траектории
+	// профиля в p_end (мир, конец в момент касания), касание — пространство p_space
+	void body_portal(int p_h, const Vector3 &p_end, int p_kind, int p_space);
+	void body_clear_point(int p_h); // Снова мозг (точка пробы / портала снята)
+	int get_portal_transits() const { return portal_transits; }
+	static real_t motion_time(int p_kind, const Vector3 &p_a, const Vector3 &p_b, real_t p_walk, real_t p_impulse, real_t p_gravity); // EnemyLinks::begin
+	static int motion_kind(int p_kind, const Vector3 &p_a, const Vector3 &p_b, real_t p_impulse, real_t p_gravity); // Вид после begin (прыжок не по силам — залезть / спрыгнуть)
 	// Таблица связей карты (координаты пространства корабля; номер — NavLinkSet.links)
 	void set_links(const PackedVector3Array &p_starts, const PackedVector3Array &p_ends, const PackedInt32Array &p_kinds);
 	void body_add_hits(int p_h, int p_hits);

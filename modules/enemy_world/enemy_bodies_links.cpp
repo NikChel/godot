@@ -106,8 +106,10 @@ bool EnemyBodies::_link_wait(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 // путь с конца связи).
 void EnemyBodies::_link_move(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt) {
 	const bool has_goal = r_b.moving;
-	const Space &sp = spaces[0]; // На связи — всегда корабль (телепорт отпускает связь)
-	const Vector3 goal = has_goal ? sp.inv.xform(r_b.world) : Vector3();
+	// Пространство тела: на связи и в полёте портала — корабль, в LINK_LAND после портала — уже пространство цели
+	const Space &sp = spaces[r_b.space];
+	Transform3D fx = p_fx;
+	Vector3 goal = has_goal ? sp.inv.xform(r_b.world) : Vector3();
 	Vector3 vel;
 	if (r_b.link_state == LINK_ON) {
 		on_link++;
@@ -123,8 +125,17 @@ void EnemyBodies::_link_move(int p_h, Body &r_b, CharacterBody3D *p_body, const 
 			}
 			_link_release(p_h, r_b);
 			r_b.link_state = LINK_LAND;
-			r_b.land_end = p_now + _ticks(LAND_S);
 			p_body->set_velocity(Vector3());
+			const int ps = r_b.portal_space;
+			r_b.portal_space = -1;
+			if (ps >= 0 && ps != r_b.space) {
+				_set_space(p_h, r_b, ps, p_body); // Касание после портала — пространство цели
+				r_b.link_state = LINK_LAND;
+				fx = r_b.frame_last;
+				goal = has_goal ? spaces[ps].inv.xform(r_b.world) : Vector3();
+			}
+			r_b.was_floor = false; // Правило пола — страховка: проверка опоры в первом шаге после LAND_S
+			r_b.land_end = p_now + _ticks(LAND_S);
 			vel = Vector3();
 		}
 	} else if (p_now >= r_b.land_end) {
@@ -134,7 +145,65 @@ void EnemyBodies::_link_move(int p_h, Body &r_b, CharacterBody3D *p_body, const 
 	_lag(r_b, 0.0f, p_dt);
 	r_b.want_speed = 0.0f;
 	r_b.state = EnemyWorld::AGENT_LINK;
-	_publish(r_b, p_body, p_fx, vel, goal, has_goal, p_now);
+	_publish(r_b, p_body, fx, vel, goal, has_goal, p_now);
+}
+
+void EnemyBodies::body_portal(int p_h, const Vector3 &p_end, int p_kind, int p_space) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_space, (int)spaces.size());
+	Body &b = bodies[p_h];
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	ERR_FAIL_NULL(body);
+	if (b.dead) {
+		return;
+	}
+	_space_xforms(); // Из физ-тика прохода — позы пространств этого тика
+	if (b.space != 0) {
+		_set_space(p_h, b, 0, body); // Полёт — в общем родителе (корабль); _set_space отпускает связь
+	} else {
+		_link_release(p_h, b);
+	}
+	EnemyLinks::Motion &m = b.motion;
+	m.kind = p_kind;
+	m.a = spaces[0].inv.xform(body->get_global_position());
+	m.b = spaces[0].inv.xform(p_end);
+	m.walk = b.speed;
+	m.impulse = b.jump_impulse;
+	m.gravity = b.jump_gravity;
+	EnemyLinks::begin(m);
+	b.link = -1;
+	b.link_t = 0.0f;
+	b.link_state = LINK_ON;
+	b.portal_space = p_space;
+	EnemyWorld *c = _crowd(b);
+	if (c != nullptr && b.crowd >= 0) {
+		c->agent_set_airborne(b.crowd, true);
+	}
+	portal_transits++;
+	_emit(EVENT_JUMP, p_h);
+}
+
+real_t EnemyBodies::motion_time(int p_kind, const Vector3 &p_a, const Vector3 &p_b, real_t p_walk, real_t p_impulse, real_t p_gravity) {
+	EnemyLinks::Motion m;
+	m.kind = p_kind;
+	m.a = p_a;
+	m.b = p_b;
+	m.walk = p_walk;
+	m.impulse = p_impulse;
+	m.gravity = p_gravity;
+	EnemyLinks::begin(m);
+	return m.duration;
+}
+
+int EnemyBodies::motion_kind(int p_kind, const Vector3 &p_a, const Vector3 &p_b, real_t p_impulse, real_t p_gravity) {
+	EnemyLinks::Motion m;
+	m.kind = p_kind;
+	m.a = p_a;
+	m.b = p_b;
+	m.impulse = p_impulse;
+	m.gravity = p_gravity;
+	EnemyLinks::begin(m);
+	return m.kind;
 }
 
 // Отпустить связь: занятость; на связи — толпа снова видит агента, путь — с конца связи.
