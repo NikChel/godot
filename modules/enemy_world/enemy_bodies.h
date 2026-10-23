@@ -123,6 +123,7 @@ private:
 		ObjectID body_id;
 		ObjectID zone_id;
 		int space = 0; // Пространство тела (индекс в spaces)
+		uint32_t platform_layers = UINT32_MAX; // Слои платформ тела вне подвижного пространства (в нём — 0: переносим сами)
 		Transform3D frame_last;
 		Vector3 up = Vector3(0.0f, 1.0f, 0.0f); // Верх тела (up_direction): у CharacterBody3D в C++ он приватный — держим здесь
 		int crowd = -1; // Ручка EnemyWorld

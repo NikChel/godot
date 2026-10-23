@@ -102,6 +102,7 @@ int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_vi
 	b.speed = p_speed;
 	b.yaw = p_yaw;
 	b.up = p_body->get(SNAME("up_direction"));
+	b.platform_layers = p_body->get_platform_floor_layers();
 	// Новое тело — в пространстве корабля; в другое переведёт правило пола
 	if (!spaces.is_empty() && spaces[0].crowd.is_valid()) {
 		_space_xforms();
@@ -162,6 +163,8 @@ void EnemyBodies::_set_space(int p_h, Body &r_b, int p_space, CharacterBody3D *p
 		r_b.crowd = sp.crowd->agent_add(sp.inv.xform(pos));
 	}
 	r_b.frame_last = _frame_xform(r_b);
+	// Опора подвижного пространства не добавляет телу свою скорость: перенос — _carry (как PlayerFrame.switch_to)
+	p_body->set_platform_floor_layers(sp.frame ? 0 : r_b.platform_layers);
 	const Vector3 vel = p_body->get_velocity();
 	p_body->set_global_transform(Transform3D(r_b.frame_last.basis, pos));
 	p_body->set_velocity(vel);
