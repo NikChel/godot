@@ -499,13 +499,22 @@ void NavMeshGenerator3D::generator_bake_from_source_geometry_data(NavMeshGenerat
 
 	p_generator_task->bake_state = NavMeshBakeState::BAKE_STATE_SAMPLE_PARTITIONING; // step #7
 
+	bool regions_ok = false;
 	if (p_navigation_mesh->get_sample_partition_type() == NavigationMesh::SAMPLE_PARTITION_WATERSHED) {
 		ERR_FAIL_COND(!rcBuildDistanceField(&ctx, *chf));
-		ERR_FAIL_COND(!rcBuildRegions(&ctx, *chf, cfg.borderSize, cfg.minRegionArea, cfg.mergeRegionArea));
+		regions_ok = rcBuildRegions(&ctx, *chf, cfg.borderSize, cfg.minRegionArea, cfg.mergeRegionArea);
 	} else if (p_navigation_mesh->get_sample_partition_type() == NavigationMesh::SAMPLE_PARTITION_MONOTONE) {
-		ERR_FAIL_COND(!rcBuildRegionsMonotone(&ctx, *chf, cfg.borderSize, cfg.minRegionArea, cfg.mergeRegionArea));
+		regions_ok = rcBuildRegionsMonotone(&ctx, *chf, cfg.borderSize, cfg.minRegionArea, cfg.mergeRegionArea);
 	} else {
-		ERR_FAIL_COND(!rcBuildLayerRegions(&ctx, *chf, cfg.borderSize, cfg.minRegionArea));
+		regions_ok = rcBuildLayerRegions(&ctx, *chf, cfg.borderSize, cfg.minRegionArea);
+	}
+	if (!regions_ok) {
+		// NikChel: partitioning fails on region id overflow (large detailed geometry, small agent radius) -- an expected
+		// outcome the caller handles (empty mesh, retry with other settings), not an engine error. Free the compact
+		// heightfield (the former ERR_FAIL_COND leaked it).
+		print_verbose("NavigationMesh baking: region partitioning failed (region id overflow?), navigation mesh left empty.");
+		rcFreeCompactHeightfield(chf);
+		return;
 	}
 
 	p_generator_task->bake_state = NavMeshBakeState::BAKE_STATE_CREATING_CONTOURS; // step #8
