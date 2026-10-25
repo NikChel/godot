@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/render_data.h"
 #include "servers/rendering/storage/render_scene_data.h"
 
@@ -66,7 +67,7 @@ layout(set = 0, binding = 9, std140) uniform Frame {
 	ivec4 sizes; // xy: the frame, zw: the trace
 	vec4 misc; // frame index, max ray distance, intensity, debug mode
 	vec4 sun_direction; // toward the sun, world space
-	vec4 sun_color;
+	vec4 sun_color; // w: the camera's exposure, which the shapes' glow is scaled by
 	vec4 ambient; // w: how far a GI ray goes against the collision shapes
 	ivec4 counts; // x: primitives, y: tree nodes, z: omni lights, w: spot lights
 	vec4 omni_position[8]; // w: 1 / range
@@ -672,13 +673,13 @@ vec3 world_light(vec3 x, vec3 n, int hit, sampler2D depth_tex, sampler2D color_t
 				vec2 pp = prev_pixel(v, pd);
 				if (on_screen(pp)) {
 					vec3 seen = texture(color_tex, (pp + 0.5) / vec2(f.sizes.xy)).rgb;
-					return with_glow ? seen : max(seen - prims.p[hit].emission.rgb, vec3(0.0));
+					return with_glow ? seen : max(seen - prims.p[hit].emission.rgb * f.sun_color.w, vec3(0.0));
 				}
 			}
 		}
 	}
 	vec3 albedo = prims.p[hit].albedo.rgb;
-	vec3 glow = with_glow ? prims.p[hit].emission.rgb : vec3(0.0);
+	vec3 glow = with_glow ? prims.p[hit].emission.rgb * f.sun_color.w : vec3(0.0);
 	if (f.cache.z != 0u) {
 		bool claimed;
 		int slot = cache_slot(x, n, from_pixels, claimed);
@@ -1703,9 +1704,12 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	data.sun_direction[1] = s.sun_direction.y;
 	data.sun_direction[2] = s.sun_direction.z;
 	data.sun_direction[3] = s.sun_color.get_luminance() > 0.0f ? 1.0f : 0.0f;
-	data.sun_color[0] = s.sun_color.r;
-	data.sun_color[1] = s.sun_color.g;
-	data.sun_color[2] = s.sun_color.b;
+	// The camera's exposure, which Godot scales its lights and emission by (as the frame the screen rays read is).
+	const float exposure = p_render_data->get_camera_attributes().is_valid() ? RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->get_camera_attributes()) : 1.0f;
+	data.sun_color[0] = s.sun_color.r * exposure;
+	data.sun_color[1] = s.sun_color.g * exposure;
+	data.sun_color[2] = s.sun_color.b * exposure;
+	data.sun_color[3] = exposure;
 	data.ambient[0] = s.ambient.r;
 	data.ambient[1] = s.ambient.g;
 	data.ambient[2] = s.ambient.b;
@@ -1723,9 +1727,9 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 		data.spot_direction[i][1] = s.spot_direction[i].y;
 		data.spot_direction[i][2] = s.spot_direction[i].z;
 		data.spot_direction[i][3] = s.spot_cos_angle[i];
-		data.spot_color[i][0] = s.spot_color[i].r;
-		data.spot_color[i][1] = s.spot_color[i].g;
-		data.spot_color[i][2] = s.spot_color[i].b;
+		data.spot_color[i][0] = s.spot_color[i].r * exposure;
+		data.spot_color[i][1] = s.spot_color[i].g * exposure;
+		data.spot_color[i][2] = s.spot_color[i].b * exposure;
 		data.spot_color[i][3] = s.spot_attenuation[i];
 		data.spot_cone[i][0] = s.spot_cone_attenuation[i];
 	}
@@ -1743,9 +1747,9 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 			axes[k][1] = s.emissive_axis[i][k].y;
 			axes[k][2] = s.emissive_axis[i][k].z;
 		}
-		data.emit_color[i][0] = s.emissive_color[i].r;
-		data.emit_color[i][1] = s.emissive_color[i].g;
-		data.emit_color[i][2] = s.emissive_color[i].b;
+		data.emit_color[i][0] = s.emissive_color[i].r * exposure;
+		data.emit_color[i][1] = s.emissive_color[i].g * exposure;
+		data.emit_color[i][2] = s.emissive_color[i].b * exposure;
 	}
 	data.cache[0] = frame;
 	data.cache[1] = CACHE_SLOTS - 1;
@@ -1771,9 +1775,9 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 		data.omni_position[i][1] = s.omni_position[i].y;
 		data.omni_position[i][2] = s.omni_position[i].z;
 		data.omni_position[i][3] = s.omni_inv_range[i];
-		data.omni_color[i][0] = s.omni_color[i].r;
-		data.omni_color[i][1] = s.omni_color[i].g;
-		data.omni_color[i][2] = s.omni_color[i].b;
+		data.omni_color[i][0] = s.omni_color[i].r * exposure;
+		data.omni_color[i][1] = s.omni_color[i].g * exposure;
+		data.omni_color[i][2] = s.omni_color[i].b * exposure;
 		data.omni_color[i][3] = s.omni_attenuation[i];
 	}
 	rd->buffer_update(data_buffer, 0, sizeof(data), &data);

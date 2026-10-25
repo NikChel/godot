@@ -309,6 +309,16 @@ multiple bounces.
   Emissive meshes without a body count as their bounding box.
   `WorldBoundaryShape3D` and Blast chunks (`PhysXDestructible3D`) don't take
   part yet, except as what's on screen.
+- A body's look comes from the mesh under it, or else the mesh it sits
+  under (a model with its collision body as a child): its albedo from the
+  first surface with a `StandardMaterial3D`, its glow from its brightest
+  surface. PXTGI can't read a `ShaderMaterial`; give one a `pxtgi_albedo`
+  and/or `pxtgi_emission` Color in its metadata (or `pxtgi_emission` on the
+  `MeshInstance3D` for the whole mesh), or it bounces as neutral grey with
+  no glow off screen.
+- With physical light units on, lights and emission are taken at the
+  strength Godot renders them (lumens, lux, `emission_intensity`, the
+  camera's exposure).
 - Forward+ only. It uses SDFGI as its switch: while visible it turns SDFGI on
   in the scene's `Environment` at its cheapest settings and replaces its
   light; hidden or removed, the environment's own SDFGI settings are back.

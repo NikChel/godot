@@ -36,6 +36,7 @@
 #include "physx_gi_effect.h"
 
 #include "core/config/engine.h"
+#include "core/config/project_settings.h"
 #include "core/math/convex_hull.h"
 #include "core/object/callable_mp.h"
 #include "core/templates/hashfuncs.h"
@@ -369,30 +370,84 @@ Color texture_average(const Ref<Texture2D> &p_texture) {
 	return average;
 }
 
-// A mesh's albedo and emitted light (linear; emission times its energy, in the units Godot adds it to the frame; an
-// emission texture by its average).
+// The light a material gives off (linear; emission times its energy, in the units Godot adds it to the frame; an
+// emission texture by its average). A material Godot can't read the glow of (a ShaderMaterial) can say it with a
+// "pxtgi_emission" Color in its metadata.
+Color material_glow(const Ref<Material> &p_material) {
+	if (p_material.is_null()) {
+		return Color(0, 0, 0);
+	}
+	if (p_material->has_meta("pxtgi_emission")) {
+		Color glow = Color(p_material->get_meta("pxtgi_emission")).srgb_to_linear();
+		glow.a = 1.0f;
+		return glow;
+	}
+	Ref<BaseMaterial3D> material = p_material;
+	if (material.is_null() || !material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+		return Color(0, 0, 0);
+	}
+	const Color base = material->get_emission().srgb_to_linear();
+	Ref<Texture2D> texture = material->get_texture(BaseMaterial3D::TEXTURE_EMISSION);
+	Color glow = base;
+	if (texture.is_valid()) {
+		const Color average = texture_average(texture);
+		glow = material->get_emission_operator() == BaseMaterial3D::EMISSION_OP_ADD ? base + average : base * average;
+	}
+	glow.a = 1.0f;
+	// With physical light units Godot also scales it by the material's intensity in nits.
+	const bool physical = GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units");
+	return glow * material->get_emission_energy_multiplier() * (physical ? material->get_emission_intensity() : 1.0f);
+}
+
+// A light's colour times its strength, in the trace's units: Godot's light energy over pi (Godot scales a light by pi
+// without physical light units). With them, Godot scales it by its intensity instead: lux for the sun, lumens over 4 pi
+// for an omni light and over pi for a spot.
+Color light_strength(const Light3D *p_light) {
+	float strength = p_light->get_param(Light3D::PARAM_ENERGY);
+	if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units")) {
+		const float intensity = p_light->get_param(Light3D::PARAM_INTENSITY);
+		if (Object::cast_to<DirectionalLight3D>(p_light)) {
+			strength *= intensity / Math::PI;
+		} else if (Object::cast_to<OmniLight3D>(p_light)) {
+			strength *= intensity / (4.0f * Math::PI * Math::PI);
+		} else {
+			strength *= intensity / (Math::PI * Math::PI);
+		}
+	}
+	return p_light->get_color().srgb_to_linear() * strength;
+}
+
+// A mesh's albedo (its first surface Godot can read the colour of, or that says it with a "pxtgi_albedo" Color in its
+// metadata) and the light it gives off (its brightest surface: a lamp's housing and bulb are often one mesh). A
+// "pxtgi_emission" Color in the MeshInstance3D's own metadata stands for the whole mesh.
 void mesh_look(MeshInstance3D *p_mesh, Color &r_albedo, Color &r_emission) {
 	r_albedo = Color(0.5, 0.5, 0.5);
 	r_emission = Color(0, 0, 0);
-	Ref<BaseMaterial3D> material = p_mesh->get_active_material(0);
-	if (material.is_null()) {
-		return;
-	}
-	r_albedo = material->get_albedo().srgb_to_linear();
-	if (material->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
-		const Color base = material->get_emission().srgb_to_linear();
-		Ref<Texture2D> texture = material->get_texture(BaseMaterial3D::TEXTURE_EMISSION);
-		Color glow = base;
-		if (texture.is_valid()) {
-			const Color average = texture_average(texture);
-			glow = material->get_emission_operator() == BaseMaterial3D::EMISSION_OP_ADD ? base + average : base * average;
+	bool have_albedo = false;
+	const int surfaces = p_mesh->get_mesh().is_valid() ? p_mesh->get_mesh()->get_surface_count() : 0;
+	for (int i = 0; i < MAX(surfaces, 1); i++) {
+		const Ref<Material> material = p_mesh->get_active_material(i);
+		const Ref<BaseMaterial3D> base = material;
+		if (!have_albedo && material.is_valid() && material->has_meta("pxtgi_albedo")) {
+			r_albedo = Color(material->get_meta("pxtgi_albedo")).srgb_to_linear();
+			have_albedo = true;
+		} else if (!have_albedo && base.is_valid()) {
+			r_albedo = base->get_albedo().srgb_to_linear();
+			have_albedo = true;
 		}
-		glow.a = 1.0f;
-		r_emission = glow * material->get_emission_energy_multiplier();
+		const Color glow = material_glow(material);
+		if (glow.get_luminance() > r_emission.get_luminance()) {
+			r_emission = glow;
+		}
+	}
+	if (p_mesh->has_meta("pxtgi_emission")) {
+		r_emission = Color(p_mesh->get_meta("pxtgi_emission")).srgb_to_linear();
+		r_emission.a = 1.0f;
 	}
 }
 
-// The look of the first mesh under a body, or a neutral grey.
+// The look of the mesh a body belongs to: the first mesh under it, else the mesh it sits under (a model with its
+// collision body as a child), else a neutral grey.
 void body_look(Node *p_body, Color &r_albedo, Color &r_emission) {
 	r_albedo = Color(0.5, 0.5, 0.5);
 	r_emission = Color(0, 0, 0);
@@ -401,6 +456,9 @@ void body_look(Node *p_body, Color &r_albedo, Color &r_emission) {
 			mesh_look(mesh, r_albedo, r_emission);
 			return;
 		}
+	}
+	if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(p_body->get_parent())) {
+		mesh_look(mesh, r_albedo, r_emission);
 	}
 }
 
@@ -1189,7 +1247,7 @@ void PXTGI3D::_publish() {
 	DirectionalLight3D *light = ObjectDB::get_instance<DirectionalLight3D>(sun);
 	if (light && light->is_visible_in_tree()) {
 		s.sun_direction = light->get_global_transform().basis.get_column(2).normalized();
-		s.sun_color = light->get_color().srgb_to_linear() * light->get_param(Light3D::PARAM_ENERGY);
+		s.sun_color = light_strength(light);
 	} else {
 		s.sun_color = Color(0, 0, 0);
 	}
@@ -1202,7 +1260,7 @@ void PXTGI3D::_publish() {
 		const int i = s.omni_count++;
 		s.omni_position[i] = omni->get_global_position();
 		s.omni_inv_range[i] = 1.0f / MAX(omni->get_param(Light3D::PARAM_RANGE), 0.001f);
-		s.omni_color[i] = omni->get_color().srgb_to_linear() * omni->get_param(Light3D::PARAM_ENERGY);
+		s.omni_color[i] = light_strength(omni);
 		s.omni_attenuation[i] = omni->get_param(Light3D::PARAM_ATTENUATION);
 	}
 	s.spot_count = 0;
@@ -1217,7 +1275,7 @@ void PXTGI3D::_publish() {
 		s.spot_inv_range[i] = 1.0f / MAX(spot->get_param(Light3D::PARAM_RANGE), 0.001f);
 		s.spot_direction[i] = -xf.basis.get_column(2).normalized();
 		s.spot_cos_angle[i] = Math::cos(Math::deg_to_rad(spot->get_param(Light3D::PARAM_SPOT_ANGLE)));
-		s.spot_color[i] = spot->get_color().srgb_to_linear() * spot->get_param(Light3D::PARAM_ENERGY);
+		s.spot_color[i] = light_strength(spot);
 		s.spot_attenuation[i] = spot->get_param(Light3D::PARAM_ATTENUATION);
 		s.spot_cone_attenuation[i] = 1.0f / MAX(spot->get_param(Light3D::PARAM_SPOT_ATTENUATION), 0.001f);
 	}
