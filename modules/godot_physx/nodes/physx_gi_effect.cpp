@@ -82,8 +82,31 @@ layout(set = 0, binding = 9, std140) uniform Frame {
 	vec4 emit_z[16];
 	vec4 emit_color[16];
 	uvec4 cache; // x: frame, y: slot mask, z: on, w: rays a texel
+	// Reflection probes whose light replaces this pass's inside their box (Godot's scene shader overrides the GI
+	// buffers there): world-to-local rows, and the box's inner half extents where the override is whole (w: 1 the
+	// bounce light, 2 the reflections).
+	vec4 probe_x[8];
+	vec4 probe_y[8];
+	vec4 probe_z[8];
+	vec4 probe_core[8];
+	ivec4 probes; // x: count
 }
 f;
+
+// Whether a reflection probe replaces this kind of light (1 bounce, 2 reflections) at world point w anyway: then
+// there's no point tracing it.
+bool probe_overrides(vec3 w, int what) {
+	for (int i = 0; i < f.probes.x; i++) {
+		if ((int(f.probe_core[i].w) & what) == 0) {
+			continue;
+		}
+		vec3 l = vec3(dot(f.probe_x[i].xyz, w) + f.probe_x[i].w, dot(f.probe_y[i].xyz, w) + f.probe_y[i].w, dot(f.probe_z[i].xyz, w) + f.probe_z[i].w);
+		if (all(lessThanEqual(abs(l), f.probe_core[i].xyz))) {
+			return true;
+		}
+	}
+	return false;
+}
 
 // Godot packs roughness with a dynamic-object flag (above one half: mirrored) and a 127 / 255 scale.
 float decode_roughness(float w) {
@@ -757,6 +780,10 @@ void main() {
 		return;
 	}
 	vec3 p = view_from_pixel(vec2(fp), depth, f.proj_info, f.clip.x, f.clip.y);
+	if (probe_overrides((f.view_to_world * vec4(p, 1.0)).xyz, 1)) {
+		imageStore(dst, px, vec4(0.0));
+		return;
+	}
 	vec3 n = normalize(texelFetch(normal_tex, fp, 0).xyz * 2.0 - 1.0);
 	vec3 t = normalize(cross(n, abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
 	vec3 b = cross(n, t);
@@ -1035,6 +1062,10 @@ void main() {
 	}
 	vec3 n = normalize(nr.xyz * 2.0 - 1.0);
 	vec3 p = view_from_pixel(vec2(fp), depth, f.proj_info, f.clip.x, f.clip.y);
+	if (probe_overrides((f.view_to_world * vec4(p, 1.0)).xyz, 2)) {
+		imageStore(dst, px, vec4(0.0));
+		return;
+	}
 	vec3 v = normalize(p);
 
 	// A microfacet normal from the GGX distribution, low-discrepancy over frames.
@@ -1378,6 +1409,11 @@ struct FrameData {
 	float emit_z[16][4];
 	float emit_color[16][4];
 	uint32_t cache[4];
+	float probe_x[8][4];
+	float probe_y[8][4];
+	float probe_z[8][4];
+	float probe_core[8][4];
+	int32_t probes[4];
 };
 
 void projection_info(const Projection &p_projection, const Size2i &p_size, float *r_info) {
@@ -1684,6 +1720,21 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	data.cache[1] = CACHE_SLOTS - 1;
 	data.cache[2] = s.multi_bounce ? 1 : 0;
 	data.cache[3] = s.rays_per_texel;
+	data.probes[0] = s.probe_count;
+	for (int i = 0; i < s.probe_count; i++) {
+		const Transform3D &t = s.probe_to_local[i];
+		for (int k = 0; k < 3; k++) {
+			float *row = k == 0 ? data.probe_x[i] : (k == 1 ? data.probe_y[i] : data.probe_z[i]);
+			row[0] = t.basis.rows[k].x;
+			row[1] = t.basis.rows[k].y;
+			row[2] = t.basis.rows[k].z;
+			row[3] = t.origin[k];
+		}
+		data.probe_core[i][0] = s.probe_core[i].x;
+		data.probe_core[i][1] = s.probe_core[i].y;
+		data.probe_core[i][2] = s.probe_core[i].z;
+		data.probe_core[i][3] = (float)s.probe_overrides[i];
+	}
 	for (int i = 0; i < s.omni_count; i++) {
 		data.omni_position[i][0] = s.omni_position[i].x;
 		data.omni_position[i][1] = s.omni_position[i].y;

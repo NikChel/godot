@@ -44,6 +44,7 @@
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/physics/collision_object_3d.h"
 #include "scene/3d/physics/collision_shape_3d.h"
+#include "scene/3d/reflection_probe.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/viewport.h"
 #include "scene/main/window.h"
@@ -734,6 +735,10 @@ void PXTGI3D::_rescan() {
 		scan_root = get_tree()->get_edited_scene_root();
 	}
 	collect(scan_root, found, sun, omnis, spots);
+	probes.clear();
+	for (const Variant &v : scan_root->find_children("*", "ReflectionProbe", true, false)) {
+		probes.push_back(Object::cast_to<Node>(v)->get_instance_id());
+	}
 	for (Node *n : found) {
 		ShapeEntry entry;
 		entry.shape_node = n->get_instance_id();
@@ -1211,6 +1216,28 @@ void PXTGI3D::_publish() {
 		s.spot_color[i] = spot->get_color().srgb_to_linear() * spot->get_param(Light3D::PARAM_ENERGY);
 		s.spot_attenuation[i] = spot->get_param(Light3D::PARAM_ATTENUATION);
 		s.spot_cone_attenuation[i] = 1.0f / MAX(spot->get_param(Light3D::PARAM_SPOT_ATTENUATION), 0.001f);
+	}
+	// Reflection probes: inside their box Godot's scene shader replaces the GI buffers' ambient (ambient mode other
+	// than Disabled) and reflections (intensity above 0) with the probe's, so those pixels needn't be traced. Only
+	// where the override is whole -- inside the blend distance, less a margin for the filters' neighbours -- and only
+	// for probes reaching every layer (the trace can't tell a pixel's layers).
+	s.probe_count = 0;
+	for (const ObjectID &id : probes) {
+		ReflectionProbe *probe = ObjectDB::get_instance<ReflectionProbe>(id);
+		if (probe == nullptr || !probe->is_visible_in_tree() || (probe->get_reflection_mask() & 0xFFFFF) != 0xFFFFF) {
+			continue;
+		}
+		const int overrides = (probe->get_ambient_mode() != ReflectionProbe::AMBIENT_DISABLED ? 1 : 0) | (probe->get_intensity() > 0.0f ? 2 : 0);
+		const Vector3 core = probe->get_size() * 0.5f - Vector3(1, 1, 1) * (probe->get_blend_distance() + 0.25f);
+		if (overrides == 0 || core.x <= 0.0f || core.y <= 0.0f || core.z <= 0.0f || s.probe_count == PhysXGIEffect::Snapshot::MAX_PROBES) {
+			continue;
+		}
+		Transform3D xf = probe->get_global_transform();
+		xf.basis.orthonormalize();
+		const int i = s.probe_count++;
+		s.probe_to_local[i] = xf.affine_inverse();
+		s.probe_core[i] = core;
+		s.probe_overrides[i] = overrides;
 	}
 	PhysXGIEffect::set_settings(get_instance_id(), s);
 	// SDFGI is only the switch that makes surfaces read the GI buffer: on, at its cheapest (one cascade of 8 m cells,

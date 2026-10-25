@@ -108,6 +108,14 @@ public:
 		bool multi_bounce = true; // off-screen hits light from the radiance cache
 		int reflection_mode = 2; // 0: Godot's own, 1: screen space, 2: screen space then the collision shapes
 		float reflection_cutoff = 0.5f; // rougher surfaces keep Godot's reflection (probes, sky)
+		// Reflection probes that override the GI buffers inside their box (Godot's scene shader replaces them there):
+		// world-to-local, the inner half extents where the override is whole, what they override (1 ambient, 2
+		// reflections).
+		static constexpr int MAX_PROBES = 8;
+		int probe_count = 0;
+		Transform3D probe_to_local[MAX_PROBES];
+		Vector3 probe_core[MAX_PROBES];
+		int probe_overrides[MAX_PROBES] = {};
 		int debug = 0; // 0: GI, 1: last frame's image at the reprojected pixel, 2: reconstruct / project round trip error
 	};
 

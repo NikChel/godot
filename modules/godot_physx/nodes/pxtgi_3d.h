@@ -98,6 +98,7 @@ class PXTGI3D : public Node3D {
 	uint32_t last_hash = 0; // what was published last: a change means the GI has to converge again
 	LocalVector<ObjectID> omnis;
 	LocalVector<ObjectID> spots;
+	LocalVector<ObjectID> probes; // ReflectionProbes: where they override the GI, it isn't traced
 	int rescan_in = 0;
 	uint32_t shape_signature = 0; // the shapes found by the last rescan: a change means rebuilding the tree
 

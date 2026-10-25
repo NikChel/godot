@@ -319,8 +319,10 @@ multiple bounces.
 - Reflection probes override PXTGI inside their box, as they do SDFGI and
   VoxelGI: a probe's cubemap replaces the traced reflections (any
   `intensity` above 0) and its ambient replaces the bounce light (any
-  `ambient_mode` but `Disabled`). PXTGI still computes both there, so use
-  probes where PXTGI doesn't reach.
+  `ambient_mode` but `Disabled`). PXTGI skips tracing what a probe
+  replaces (its box less its `blend_distance`), so probe-lit areas cost
+  little. A probe with `ambient_mode` `Disabled` keeps PXTGI's bounce light
+  and only supplies reflections; `intensity` 0 keeps the traced ones.
 - Cost (RTX 5070, 1920×1080): about 0.5–0.8 ms in the demo rooms; in the
   physics playground (2,000 boxes being blown apart) about 2 ms with
   `rays_per_texel` `2`. `rays_per_texel` and `world_ray_distance` trade
