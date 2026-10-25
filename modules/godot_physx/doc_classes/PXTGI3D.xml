@@ -9,6 +9,7 @@
 		The result is also used for reflections on smooth surfaces (see [member reflection_mode]).
 		Works with the Forward+ renderer only. It uses SDFGI as its switch: while the node is visible it turns on SDFGI in the scene's [Environment] at its cheapest settings (one cascade) and replaces SDFGI's light with its own; hidden or removed, the environment's own SDFGI settings are back. The scene needs an [Environment] (a [WorldEnvironment] or the camera's).
 		Hiding the node turns it off, as with a light: Godot's own lighting is back until it is shown again.
+		[b]Reflection probes override PXTGI inside their box[/b], as they do Godot's SDFGI and VoxelGI: a [ReflectionProbe] with an [member ReflectionProbe.intensity] above 0 replaces PXTGI's traced reflections with its cubemap, and one whose [member ReflectionProbe.ambient_mode] isn't [constant ReflectionProbe.AMBIENT_DISABLED] replaces its bounce light with the probe's ambient. PXTGI still computes both there (it runs before the surfaces are drawn), so a probe over an area PXTGI should light is wasted work twice over: use probes where PXTGI doesn't reach, or set their ambient mode to Disabled and their intensity to 0 inside PXTGI's areas.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -29,7 +30,7 @@
 			Rays each traced point sends per frame, from [code]1[/code] to [code]4[/code]. More rays settle faster and flicker less when the camera or the lights move, at about proportional cost. [code]2[/code] suits most daylight scenes; scenes lit mostly by emissives or small lights (night) look steadier with [code]4[/code].
 		</member>
 		<member name="reflection_mode" type="int" setter="set_reflection_mode" getter="get_reflection_mode" default="2">
-			Reflections on surfaces smoother than [member reflection_roughness_cutoff]: [code]0[/code] leaves them to Godot (reflection probes, sky, screen-space reflection); [code]1[/code] traces them on screen; [code]2[/code] traces them on screen, then against the collision shapes, so what is behind the camera or off screen is reflected too.
+			Reflections on surfaces smoother than [member reflection_roughness_cutoff]: [code]0[/code] leaves them to Godot (reflection probes, sky, screen-space reflection); [code]1[/code] traces them on screen; [code]2[/code] traces them on screen, then against the collision shapes, so what is behind the camera or off screen is reflected too. Inside a [ReflectionProbe]'s box the probe's cubemap replaces the traced reflections (as it does SDFGI's), whatever this is set to: leave probes out of the areas whose reflections PXTGI should trace.
 		</member>
 		<member name="reflection_roughness_cutoff" type="float" setter="set_reflection_roughness_cutoff" getter="get_reflection_roughness_cutoff" default="0.5">
 			Surfaces at or below this roughness get traced reflections ([member reflection_mode]); rougher ones keep Godot's own reflection (reflection probes, sky). Traced reflections cost per pixel, so a cutoff that includes many common materials costs a lot: at [code]0.5[/code], glossy and mirror-like surfaces are traced, while the broad, blurry reflections of rougher surfaces look the same from a probe.
