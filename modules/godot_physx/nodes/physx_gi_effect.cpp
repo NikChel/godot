@@ -212,33 +212,53 @@ layout(std430, set = 0, binding = 10) restrict readonly buffer Geometry {
 }
 geo;
 
-bool hit_box_local(vec3 o, vec3 inv, vec3 lo, vec3 hi, float best) {
-	vec3 t0 = (lo - o) * inv;
-	vec3 t1 = (hi - o) * inv;
+// Where a local ray enters a mesh tree node's box (1e30: it misses it, or only beyond best).
+float mesh_box_entry(vec3 o, vec3 inv, int at, float best) {
+	vec3 t0 = (geo.v[at].xyz - o) * inv;
+	vec3 t1 = (geo.v[at + 1].xyz - o) * inv;
 	vec3 near_t = min(t0, t1);
 	vec3 far_t = max(t0, t1);
-	return max(max(near_t.x, near_t.y), max(near_t.z, 0.0)) <= min(min(far_t.x, far_t.y), min(far_t.z, best));
+	float enter = max(max(near_t.x, near_t.y), max(near_t.z, 0.0));
+	float leave = min(min(far_t.x, far_t.y), min(far_t.z, best));
+	return enter <= leave ? enter : 1e30;
 }
 
-// The nearest triangle of a mesh along a local ray (either side), walking its own tree.
+// The nearest triangle of a mesh along a local ray (either side), walking its own tree near child first (the far
+// one waits, and is skipped once a triangle nearer than its box has been found).
 bool hit_mesh(int nodes, int tris, vec3 o, vec3 d, inout float t, out vec3 n) {
 	bool found = false;
 	vec3 inv = 1.0 / d;
-	int stack[32];
+	int stack[24];
 	int top = 0;
 	int node = 0;
+	if (mesh_box_entry(o, inv, nodes, t) >= 1e30) {
+		return false;
+	}
 	while (true) {
 		vec4 lo = geo.v[nodes + node * 2];
 		vec4 hi = geo.v[nodes + node * 2 + 1];
-		if (hit_box_local(o, inv, lo.xyz, hi.xyz, t)) {
+		{
 			int count = floatBitsToInt(hi.w);
 			if (count == 0) {
-				if (top < 32) {
-					stack[top++] = floatBitsToInt(lo.w);
+				int left = node + 1;
+				int right = floatBitsToInt(lo.w);
+				float tl = mesh_box_entry(o, inv, nodes + left * 2, t);
+				float tr = mesh_box_entry(o, inv, nodes + right * 2, t);
+				if (tl < 1e30 && tr < 1e30) {
+					bool left_first = tl <= tr;
+					if (top < 24) {
+						stack[top++] = left_first ? right : left;
+					}
+					node = left_first ? left : right;
+					continue;
+				} else if (tl < 1e30) {
+					node = left;
+					continue;
+				} else if (tr < 1e30) {
+					node = right;
+					continue;
 				}
-				node++;
-				continue;
-			}
+			} else {
 			int first = floatBitsToInt(lo.w);
 			for (int k = first; k < first + count; k++) {
 				vec3 a = geo.v[tris + k * 3].xyz;
@@ -267,11 +287,22 @@ bool hit_mesh(int nodes, int tris, vec3 o, vec3 d, inout float t, out vec3 n) {
 					found = true;
 				}
 			}
+			}
 		}
-		if (top == 0) {
+		// The next waiting node that could still hold a nearer triangle (its box again: cheaper than keeping each
+		// one's distance in registers).
+		bool next = false;
+		while (top > 0) {
+			top--;
+			if (mesh_box_entry(o, inv, nodes + stack[top] * 2, t) < 1e30) {
+				node = stack[top];
+				next = true;
+				break;
+			}
+		}
+		if (!next) {
 			break;
 		}
-		node = stack[--top];
 	}
 	// Facing the ray: a mesh is hit from either side.
 	if (found && dot(n, d) > 0.0) {

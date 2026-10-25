@@ -592,19 +592,17 @@ int build_bvh(LocalVector<BuildItem> &p_items, uint32_t p_from, uint32_t p_to, c
 	return node;
 }
 
-struct TriangleItem {
-	AABB bounds;
-	Vector3 center;
-	int index = 0;
-};
+// A mesh's triangles are split like the scene's shapes (binned SAH).
+using TriangleItem = BuildItem;
 
 void store_int(float *r_at, int p_value) {
 	memcpy(r_at, &p_value, sizeof(int));
 }
 
-// A mesh's tree over its triangles (median split, leaves of up to four), in the scene tree's node layout; the
-// triangles reordered to its leaves.
-int build_triangle_tree(LocalVector<TriangleItem> &p_items, uint32_t p_from, uint32_t p_to, const Vector<Vector3> &p_corners, Vector<float> &r_nodes, Vector<float> &r_triangles) {
+// A mesh's tree over its triangles (binned SAH splits, median where SAH finds none, leaves of up to four), in the scene
+// tree's node layout; the triangles reordered to its leaves. Never deeper than 23 levels (the shader's mesh walk keeps
+// a 24-entry stack).
+int build_triangle_tree(LocalVector<TriangleItem> &p_items, uint32_t p_from, uint32_t p_to, const Vector<Vector3> &p_corners, Vector<float> &r_nodes, Vector<float> &r_triangles, int p_depth = 0) {
 	AABB bounds = p_items[p_from].bounds;
 	AABB centres(p_items[p_from].center, Vector3());
 	for (uint32_t i = p_from + 1; i < p_to; i++) {
@@ -623,7 +621,18 @@ int build_triangle_tree(LocalVector<TriangleItem> &p_items, uint32_t p_from, uin
 	out[5] = hi.y;
 	out[6] = hi.z;
 	const uint32_t count = p_to - p_from;
-	if (count <= 4) {
+	uint32_t mid = p_from;
+	if (count > 4 && p_depth < 23) {
+		mid = sah_split(p_items, p_from, p_to, centres);
+		if (mid == p_from || mid == p_to) {
+			const int axis = centres.get_longest_axis_index();
+			mid = p_from + count / 2;
+			std::nth_element(p_items.ptr() + p_from, p_items.ptr() + mid, p_items.ptr() + p_to, [axis](const TriangleItem &a, const TriangleItem &b) {
+				return a.center[axis] < b.center[axis];
+			});
+		}
+	}
+	if (mid == p_from) {
 		store_int(&out[3], r_triangles.size() / 12);
 		store_int(&out[7], count);
 		for (uint32_t i = p_from; i < p_to; i++) {
@@ -637,13 +646,8 @@ int build_triangle_tree(LocalVector<TriangleItem> &p_items, uint32_t p_from, uin
 		}
 		return node;
 	}
-	const int axis = centres.get_longest_axis_index();
-	const uint32_t mid = p_from + count / 2;
-	std::nth_element(p_items.ptr() + p_from, p_items.ptr() + mid, p_items.ptr() + p_to, [axis](const TriangleItem &a, const TriangleItem &b) {
-		return a.center[axis] < b.center[axis];
-	});
-	build_triangle_tree(p_items, p_from, mid, p_corners, r_nodes, r_triangles);
-	const int right = build_triangle_tree(p_items, mid, p_to, p_corners, r_nodes, r_triangles);
+	build_triangle_tree(p_items, p_from, mid, p_corners, r_nodes, r_triangles, p_depth + 1);
+	const int right = build_triangle_tree(p_items, mid, p_to, p_corners, r_nodes, r_triangles, p_depth + 1);
 	out = r_nodes.ptrw() + node * 8;
 	store_int(&out[3], right);
 	store_int(&out[7], 0);
@@ -709,7 +713,7 @@ const PXTGI3D::GeometryBlock *PXTGI3D::_geometry_for(const Ref<Shape3D> &p_shape
 			AABB b(corners[i * 3], Vector3());
 			b.expand_to(corners[i * 3 + 1]);
 			b.expand_to(corners[i * 3 + 2]);
-			items[i] = { b, b.get_center(), int(i) };
+			items[i] = { b, b.get_center(), int(i), b.position, b.position + b.size };
 		}
 		build_triangle_tree(items, 0, items.size(), corners, block.nodes, block.triangles);
 		block.type = 5;
