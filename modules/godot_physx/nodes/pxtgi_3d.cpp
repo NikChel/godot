@@ -355,9 +355,13 @@ void PXTGI3D::_detach() {
 
 namespace {
 
-// A texture's average colour (linear), once per texture: a masked emission's overall glow.
+// Textures' average colours, worked out once each (forgotten whenever the GI walks the scene again, so the map
+// doesn't keep growing with textures long gone).
+HashMap<ObjectID, Color> texture_averages;
+
+// A texture's average colour (linear): a masked emission's overall glow.
 Color texture_average(const Ref<Texture2D> &p_texture) {
-	static HashMap<ObjectID, Color> known;
+	HashMap<ObjectID, Color> &known = texture_averages;
 	if (const Color *c = known.getptr(p_texture->get_instance_id())) {
 		return *c;
 	}
@@ -460,19 +464,38 @@ void mesh_look(MeshInstance3D *p_mesh, Color &r_albedo, Color &r_emission) {
 	}
 }
 
+// The first MeshInstance3D among p_node's children.
+MeshInstance3D *first_mesh_child(const Node *p_node) {
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(p_node->get_child(i))) {
+			return mesh;
+		}
+	}
+	return nullptr;
+}
+
 // The look of the mesh a body belongs to: the first mesh under it, else the mesh it sits under (a model with its
-// collision body as a child), else a neutral grey.
+// collision body as a child), else the first mesh beside it, else a neutral grey. A "pxtgi_albedo" or "pxtgi_emission"
+// Color in the body's own metadata says it outright.
 void body_look(Node *p_body, Color &r_albedo, Color &r_emission) {
 	r_albedo = Color(0.5, 0.5, 0.5);
 	r_emission = Color(0, 0, 0);
-	for (int i = 0; i < p_body->get_child_count(); i++) {
-		if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(p_body->get_child(i))) {
-			mesh_look(mesh, r_albedo, r_emission);
-			return;
-		}
+	MeshInstance3D *mesh = first_mesh_child(p_body);
+	if (mesh == nullptr) {
+		mesh = Object::cast_to<MeshInstance3D>(p_body->get_parent());
 	}
-	if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(p_body->get_parent())) {
+	if (mesh == nullptr && p_body->get_parent()) {
+		mesh = first_mesh_child(p_body->get_parent());
+	}
+	if (mesh) {
 		mesh_look(mesh, r_albedo, r_emission);
+	}
+	if (p_body->has_meta("pxtgi_albedo")) {
+		r_albedo = Color(p_body->get_meta("pxtgi_albedo")).srgb_to_linear();
+	}
+	if (p_body->has_meta("pxtgi_emission")) {
+		r_emission = Color(p_body->get_meta("pxtgi_emission")).srgb_to_linear();
+		r_emission.a = 1.0f;
 	}
 }
 
@@ -846,6 +869,7 @@ Node *PXTGI3D::_scan_root() const {
 void PXTGI3D::_track_all(Node *p_root) {
 	tracked.clear();
 	looks.clear();
+	texture_averages.clear();
 	collect(p_root, tracked);
 	tracked_root = p_root->get_instance_id();
 	tracked_changed = true;
@@ -960,8 +984,9 @@ void PXTGI3D::_rescan() {
 		entry.albedo = look->first;
 		entry.emission = look->second;
 		if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(n)) {
-			// A mesh outside any body only counts while it gives off light.
-			if (mesh->get_mesh().is_null() || entry.emission.get_luminance() <= 0.0f) {
+			// A mesh outside any body only counts while it gives off light (and not when it's kept out of GI, as
+			// Godot's own GI leaves it out).
+			if (mesh->get_mesh().is_null() || entry.emission.get_luminance() <= 0.0f || mesh->get_gi_mode() == GeometryInstance3D::GI_MODE_DISABLED) {
 				continue;
 			}
 			entry.mesh_proxy = true;
