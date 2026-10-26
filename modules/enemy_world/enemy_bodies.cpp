@@ -290,6 +290,60 @@ int EnemyBodies::body_state(int p_h) const {
 	return bodies[p_h].state;
 }
 
+void EnemyBodies::body_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_fall_angle, real_t p_down_angle, real_t p_height, real_t p_down_time, real_t p_rise_time, real_t p_stagger_angle, real_t p_knockback) {
+	ERR_FAIL_COND(!_valid(p_h));
+	EnemyTumbler &t = bodies[p_h].tumb;
+	t.hit_id = p_hit_body ? p_hit_body->get_instance_id() : ObjectID();
+	t.inertia = p_inertia;
+	t.frequency = p_frequency;
+	t.damping = p_damping;
+	t.fall_angle = p_fall_angle;
+	t.down_angle = p_down_angle;
+	t.height = p_height;
+	t.down_time = p_down_time;
+	t.rise_time = p_rise_time;
+	t.stagger_angle = p_stagger_angle;
+	t.knockback = p_knockback;
+}
+
+// Толчок: наклон и отброс — горизонталь импульса (кадр основания) в скорость тела.
+void EnemyBodies::body_push(int p_h, const Vector3 &p_r, const Vector3 &p_j) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Body &b = bodies[p_h];
+	if (b.dead) {
+		return;
+	}
+	b.tumb.push(p_r, p_j);
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	if (body != nullptr) {
+		const Vector3 j_h = Vector3(p_j.x, 0.0f, p_j.z) * b.tumb.knockback;
+		body->set_velocity(body->get_velocity() + _frame_xform(b).basis.xform(j_h));
+	}
+}
+
+Transform3D EnemyBodies::body_tumble_base(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Transform3D());
+	const Body &b = bodies[p_h];
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	ERR_FAIL_NULL_V(body, Transform3D());
+	return _tumble_base(b, body);
+}
+
+Vector3 EnemyBodies::body_tumble_spin(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	return bodies[p_h].tumb.spin;
+}
+
+Vector3 EnemyBodies::body_tilt(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	return bodies[p_h].tumb.tilt;
+}
+
+int EnemyBodies::body_tumble_state(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), EnemyTumbler::STAND);
+	return bodies[p_h].tumb.state;
+}
+
 int EnemyBodies::body_brain(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), BRAIN_IDLE);
 	return bodies[p_h].brain;
@@ -398,6 +452,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 			continue;
 		}
 		_tick_body((int)h, b, body, now, p_delta);
+		b.tumb.place(_tumble_base(b, body)); // Поза тела этого тика — окончательная
 	}
 	last_tick_usec = OS::get_singleton()->get_ticks_usec() - t0;
 	return events;
@@ -406,6 +461,9 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 // Порядок — EnemyWalker._physics_process (до этапа 2); связь — своя ветка (enemy_bodies_links.cpp).
 void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt) {
 	Transform3D fx = _carry(r_b, p_body);
+	if (r_b.tumb.step(p_dt)) {
+		r_b.tumb.log_state();
+	}
 	if (r_b.link_state == LINK_ON || r_b.link_state == LINK_LAND) {
 		_link_move(p_h, r_b, p_body, fx, p_now, p_dt);
 		return;
@@ -487,7 +545,7 @@ void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D
 	r_b.net_tick = (int64_t)p_now;
 	r_b.net_pos = p_fx.affine_inverse().xform(pos);
 	if (views.is_valid() && r_b.view >= 0) { // Визуалу — в системе пространства (кадр ставит позой кадра системы)
-		views->view_commit(r_b.view, Transform3D(Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.view_speed, r_b.space);
+		views->view_commit(r_b.view, Transform3D(r_b.tumb.basis() * Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.view_speed, r_b.space);
 	}
 	tier_counts[r_b.tier]++;
 }
@@ -513,6 +571,11 @@ Transform3D EnemyBodies::_carry(Body &r_b, CharacterBody3D *p_body) {
 		r_b.frame_last = now;
 	}
 	return now;
+}
+
+// Основание неваляшки (мир): базис системы тела в точке тела — у хоста и копий одно.
+Transform3D EnemyBodies::_tumble_base(const Body &p_b, CharacterBody3D *p_body) const {
+	return Transform3D(_frame_xform(p_b).basis, p_body->get_global_position());
 }
 
 // Взгляд (мир, по верху тела): −Z торса.
@@ -574,6 +637,15 @@ uint64_t EnemyBodies::_ticks(real_t p_s) {
 }
 
 void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now) {
+	if (r_b.tumb.staggered()) { // Оглушён: замах сбит, стоит (и у точки пробы)
+		r_b.brain = BRAIN_STAGGER;
+		r_b.moving = false;
+		return;
+	}
+	if (r_b.brain == BRAIN_STAGGER) {
+		r_b.brain = BRAIN_IDLE;
+		r_b.moving = r_b.point_set; // Точка пробы — снова к ней
+	}
 	if (r_b.point_set) {
 		return;
 	}
@@ -937,6 +1009,12 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_crowd_stats", "handle"), &EnemyBodies::body_crowd_stats);
 	ClassDB::bind_method(D_METHOD("body_net_tick", "handle"), &EnemyBodies::body_net_tick);
 	ClassDB::bind_method(D_METHOD("body_net_pos", "handle"), &EnemyBodies::body_net_pos);
+	ClassDB::bind_method(D_METHOD("body_set_tumbler", "handle", "hit_body", "inertia", "frequency", "damping", "fall_angle", "down_angle", "height", "down_time", "rise_time", "stagger_angle", "knockback"), &EnemyBodies::body_set_tumbler);
+	ClassDB::bind_method(D_METHOD("body_push", "handle", "arm", "impulse"), &EnemyBodies::body_push);
+	ClassDB::bind_method(D_METHOD("body_tumble_base", "handle"), &EnemyBodies::body_tumble_base);
+	ClassDB::bind_method(D_METHOD("body_tumble_spin", "handle"), &EnemyBodies::body_tumble_spin);
+	ClassDB::bind_method(D_METHOD("body_tilt", "handle"), &EnemyBodies::body_tilt);
+	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);
 	ClassDB::bind_method(D_METHOD("set_players", "positions", "alive", "ids"), &EnemyBodies::set_players);
 	ClassDB::bind_method(D_METHOD("set_nav_ready", "ready"), &EnemyBodies::set_nav_ready);
 	ClassDB::bind_method(D_METHOD("set_tier_override", "tier"), &EnemyBodies::set_tier_override);
@@ -955,6 +1033,7 @@ void EnemyBodies::_bind_methods() {
 	BIND_ENUM_CONSTANT(BRAIN_CHASE);
 	BIND_ENUM_CONSTANT(BRAIN_WINDUP);
 	BIND_ENUM_CONSTANT(BRAIN_RECOVER);
+	BIND_ENUM_CONSTANT(BRAIN_STAGGER);
 	BIND_ENUM_CONSTANT(TIER_NEAR);
 	BIND_ENUM_CONSTANT(TIER_FAR);
 	BIND_ENUM_CONSTANT(EVENT_ACTION);

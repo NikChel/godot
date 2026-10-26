@@ -1,5 +1,6 @@
 #include "enemy_replicas.h"
 
+#include "core/config/engine.h"
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
@@ -254,10 +255,14 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 	due_handles.clear();
 	due_clips.clear();
 	_space_xforms();
+	const real_t dt = 1.0f / (real_t)MAX(1, Engine::get_singleton()->get_physics_ticks_per_second());
 	for (uint32_t h = 0; h < reps.size(); h++) {
 		Replica &r = reps[h];
 		if (!r.used) {
 			continue;
+		}
+		if (r.tumb.step(dt)) {
+			r.tumb.log_state();
 		}
 		Node3D *body = r.body_id.is_valid() ? Object::cast_to<Node3D>(ObjectDB::get_instance(r.body_id)) : nullptr;
 		const bool sampled = body != nullptr && _sample(r, r.t_local, p_seek);
@@ -267,12 +272,15 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			body->set_global_position(world);
 		}
 		if (sampled && views.is_valid() && r.view >= 0) {
-			const Basis yaw(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
+			const Basis yaw = r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
 			if (r.cross) {
 				views->view_commit(r.view, Transform3D(xf.basis * yaw, world), r.step_lag, r.speed, -1);
 			} else {
 				views->view_commit(r.view, Transform3D(yaw, r.pos), r.step_lag, r.speed, r.space);
 			}
+		}
+		if (body != nullptr) {
+			r.tumb.place(_tumble_base(r, body));
 		}
 		StringName e = _pop_due(r, p_seek);
 		while (e != NONE_EVENT) {
@@ -283,6 +291,56 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 	}
 	last_tick_usec = OS::get_singleton()->get_ticks_usec() - t0;
 	return due_handles;
+}
+
+// Основание неваляшки (мир): базис системы копии (подвижная — её поза, корабль — мир, как у тела хоста) в точке тела.
+Transform3D EnemyReplicas::_tumble_base(const Replica &p_r, Node3D *p_body) const {
+	const bool frame = p_r.space > 0 && p_r.space < (int)spaces.size() && spaces[p_r.space].frame;
+	return Transform3D(frame ? spaces[p_r.space].xf.basis : Basis(), p_body->get_global_position());
+}
+
+void EnemyReplicas::replica_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_fall_angle, real_t p_down_angle, real_t p_height, real_t p_down_time, real_t p_rise_time, real_t p_stagger_angle, real_t p_knockback) {
+	ERR_FAIL_COND(!_valid(p_h));
+	EnemyTumbler &t = reps[p_h].tumb;
+	t.hit_id = p_hit_body ? p_hit_body->get_instance_id() : ObjectID();
+	t.inertia = p_inertia;
+	t.frequency = p_frequency;
+	t.damping = p_damping;
+	t.fall_angle = p_fall_angle;
+	t.down_angle = p_down_angle;
+	t.height = p_height;
+	t.down_time = p_down_time;
+	t.rise_time = p_rise_time;
+	t.stagger_angle = p_stagger_angle;
+	t.knockback = p_knockback;
+}
+
+void EnemyReplicas::replica_push(int p_h, const Vector3 &p_r, const Vector3 &p_j) {
+	ERR_FAIL_COND(!_valid(p_h));
+	reps[p_h].tumb.push(p_r, p_j);
+}
+
+Transform3D EnemyReplicas::replica_tumble_base(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Transform3D());
+	const Replica &r = reps[p_h];
+	Node3D *body = Object::cast_to<Node3D>(ObjectDB::get_instance(r.body_id));
+	ERR_FAIL_NULL_V(body, Transform3D());
+	return _tumble_base(r, body);
+}
+
+Vector3 EnemyReplicas::replica_tumble_spin(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	return reps[p_h].tumb.spin;
+}
+
+Vector3 EnemyReplicas::replica_tilt(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	return reps[p_h].tumb.tilt;
+}
+
+int EnemyReplicas::replica_tumble_state(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), EnemyTumbler::STAND);
+	return reps[p_h].tumb.state;
 }
 
 int EnemyReplicas::get_replica_count() const {
@@ -309,6 +367,12 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("replica_speed", "handle"), &EnemyReplicas::replica_speed);
 	ClassDB::bind_method(D_METHOD("replica_step_lag", "handle"), &EnemyReplicas::replica_step_lag);
 	ClassDB::bind_method(D_METHOD("tick", "seek"), &EnemyReplicas::tick);
+	ClassDB::bind_method(D_METHOD("replica_set_tumbler", "handle", "hit_body", "inertia", "frequency", "damping", "fall_angle", "down_angle", "height", "down_time", "rise_time", "stagger_angle", "knockback"), &EnemyReplicas::replica_set_tumbler);
+	ClassDB::bind_method(D_METHOD("replica_push", "handle", "arm", "impulse"), &EnemyReplicas::replica_push);
+	ClassDB::bind_method(D_METHOD("replica_tumble_base", "handle"), &EnemyReplicas::replica_tumble_base);
+	ClassDB::bind_method(D_METHOD("replica_tumble_spin", "handle"), &EnemyReplicas::replica_tumble_spin);
+	ClassDB::bind_method(D_METHOD("replica_tilt", "handle"), &EnemyReplicas::replica_tilt);
+	ClassDB::bind_method(D_METHOD("replica_tumble_state", "handle"), &EnemyReplicas::replica_tumble_state);
 	ClassDB::bind_method(D_METHOD("get_due_clips"), &EnemyReplicas::get_due_clips);
 	ClassDB::bind_method(D_METHOD("get_replica_count"), &EnemyReplicas::get_replica_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyReplicas::get_last_tick_usec);

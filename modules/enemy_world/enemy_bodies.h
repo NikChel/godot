@@ -1,6 +1,7 @@
 #pragma once
 
 #include "enemy_links.h"
+#include "enemy_tumbler.h"
 #include "enemy_views.h"
 #include "enemy_world.h"
 
@@ -34,6 +35,9 @@ class Node3D;
 // 2026-10-22-nav-links-b; enemy_bodies_links.cpp): у входа связи (толпа AGENT_LINK) — ждёт (закрыта, занята, место
 // приземления занято — копит закрытие), на связи — поза по траектории профиля без физики (оба яруса), приземлился —
 // LAND_S стоит; события — клип прыжка, закрыть / открыть связь (ручка — номер связи).
+// Неваляшка (spec 2026-10-26-walker-tumbler-design): толчок (body_push) — наклон (EnemyTumbler) и отброс скорости тела
+// (только здесь, у хоста); шаг наклона — в начале тика тела; оглушён — мозг STAGGER (до точки пробы); визуал — поза с
+// наклоном, хит-тело — основание (базис системы в точке тела) × наклон в конце тика тела.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -43,6 +47,7 @@ public:
 		BRAIN_CHASE,
 		BRAIN_WINDUP,
 		BRAIN_RECOVER,
+		BRAIN_STAGGER, // Оглушён (неваляшка): не идёт, не бьёт
 	};
 
 	enum Tier {
@@ -173,6 +178,8 @@ private:
 		real_t jump_gravity = 9.8f;
 		uint32_t path_epoch = 0; // Эпоха навигации последнего запроса пути
 		LocalVector<uint8_t> link_log; // Виды пройденных связей (пробы)
+		// Неваляшка
+		EnemyTumbler tumb;
 	};
 
 	LocalVector<Body> bodies;
@@ -215,6 +222,7 @@ private:
 	Transform3D _frame_xform(const Body &p_b) const;
 	Transform3D _carry(Body &r_b, CharacterBody3D *p_body);
 	static Vector3 _forward(const Body &p_b, const Transform3D &p_fx);
+	Transform3D _tumble_base(const Body &p_b, CharacterBody3D *p_body) const;
 	// Мозг
 	int _player_index(ObjectID p_id) const;
 	bool _player_alive(int p_i) const;
@@ -287,6 +295,13 @@ public:
 	Vector3i body_crowd_stats(int p_h) const;
 	int64_t body_net_tick(int p_h) const;
 	Vector3 body_net_pos(int p_h) const;
+	// Неваляшка: хит-тело и настройки (углы — рад), толчок (плечо и импульс — кадр основания), основание (мир), наклон
+	void body_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_fall_angle, real_t p_down_angle, real_t p_height, real_t p_down_time, real_t p_rise_time, real_t p_stagger_angle, real_t p_knockback);
+	void body_push(int p_h, const Vector3 &p_r, const Vector3 &p_j);
+	Transform3D body_tumble_base(int p_h) const;
+	Vector3 body_tumble_spin(int p_h) const;
+	Vector3 body_tilt(int p_h) const;
+	int body_tumble_state(int p_h) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);
