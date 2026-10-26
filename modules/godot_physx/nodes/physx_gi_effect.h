@@ -75,7 +75,6 @@ public:
 		uint64_t geometry_version = 0;
 		Vector3 sun_direction; // toward the sun, world space
 		Color sun_color; // linear, times energy; black for none
-		Color ambient; // linear
 		// Omni lights: position and 1 / range; linear colour times energy, and the attenuation exponent.
 		static constexpr int MAX_OMNIS = 8;
 		int omni_count = 0;

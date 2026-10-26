@@ -35,9 +35,12 @@
 #include "core/object/callable_mp.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/resources/3d/world_3d.h"
+#include "servers/rendering/renderer_rd/environment/sky.h"
+#include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -91,6 +94,14 @@ layout(set = 0, binding = 9, std140) uniform Frame {
 	vec4 probe_z[8];
 	vec4 probe_core[8];
 	ivec4 probes; // x: count
+	// What a ray that leaves the scene sees: the sky's radiance map (at its roughest level: x the level, a layer or a
+	// mip; y and z the map's border offset and scale; w its strength, 0: no sky map), turned by sky_x/y/z (the
+	// world-to-sky rotation's rows), or else a background colour (sky_flat).
+	vec4 sky;
+	vec4 sky_x;
+	vec4 sky_y;
+	vec4 sky_z;
+	vec4 sky_flat;
 }
 f;
 
@@ -595,6 +606,52 @@ int cache_slot(vec3 x, vec3 n, bool claim, out bool claimed) {
 		}
 	}
 	return -1;
+}
+
+#ifdef SKY_OCTMAP_ARRAY
+layout(set = 0, binding = 11) uniform sampler2DArray sky_tex;
+#else
+layout(set = 0, binding = 11) uniform sampler2D sky_tex;
+#endif
+
+// Godot's octahedral mapping of a direction into its sky radiance map (oct_inc.glsl).
+vec2 sky_oct_wrap(vec2 v) {
+	return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+vec2 sky_oct(vec3 n) {
+	n /= abs(n.x) + abs(n.y) + abs(n.z);
+	n.xy = n.z >= 0.0 ? n.xy : sky_oct_wrap(n.xy);
+	return (n.xy * 0.5 + 0.5) * f.sky.z + f.sky.y;
+}
+
+)"
+					R"(
+// The light from the background a ray sees when it leaves the scene going along d: the sky (blurred, as many rays
+// average it), or the background colour.
+vec3 background_light(vec3 d) {
+	if (f.sky.w <= 0.0) {
+		return f.sky_flat.rgb;
+	}
+	vec3 s = vec3(dot(f.sky_x.xyz, d), dot(f.sky_y.xyz, d), dot(f.sky_z.xyz, d));
+#ifdef SKY_OCTMAP_ARRAY
+	return textureLod(sky_tex, vec3(sky_oct(s), f.sky.x), 0.0).rgb * f.sky.w;
+#else
+	return textureLod(sky_tex, sky_oct(s), f.sky.x).rgb * f.sky.w;
+#endif
+}
+
+// Whether a ray that hit nothing within reach has left the scene (the box around every shape): only then does it see
+// the background. One that ran out of reach inside a large closed space (a long tunnel) doesn't.
+bool escapes(vec3 o, vec3 d, float reach) {
+	if (f.counts.y == 0) {
+		return true;
+	}
+	vec3 inv = 1.0 / d;
+	vec3 t0 = (bvh.n[0].lo.xyz - o) * inv;
+	vec3 t1 = (bvh.n[0].hi.xyz - o) * inv;
+	vec3 far_t = max(t0, t1);
+	return min(min(far_t.x, far_t.y), far_t.z) <= reach;
 }
 
 // The light a surface patch receives straight from the sun and the omni lights (shadowed by the shapes), and the
@@ -1259,6 +1316,8 @@ void main() {
 	int hit = trace_world(origin, dir, far, wn);
 	if (hit >= 0) {
 		arriving = clamp_firefly(world_light(origin + dir * far, wn, hit, depth_tex, color_tex, false, true));
+	} else if (escapes(origin, dir, f.ambient.w)) {
+		arriving = background_light(dir);
 	}
 	// A cell averages its last 32 samples; while the light sources have just changed (a lamp switched off, an emitter
 	// gone) only its last 4, so the old light doesn't linger for seconds.
@@ -1448,6 +1507,11 @@ struct FrameData {
 	float probe_z[8][4];
 	float probe_core[8][4];
 	int32_t probes[4];
+	float sky[4];
+	float sky_x[4];
+	float sky_y[4];
+	float sky_z[4];
+	float sky_flat[4];
 };
 
 void projection_info(const Projection &p_projection, const Size2i &p_size, float *r_info) {
@@ -1538,7 +1602,10 @@ bool PhysXGIEffect::_ensure(RenderingDevice *p_rd) {
 	for (int i = 0; i < PASS_MAX; i++) {
 		Ref<RDShaderFile> file;
 		file.instantiate();
-		const String source = String(SHADERS[i]).replace("@WORLD@", WORLD).replace("@COMMON@", COMMON);
+		// The sky's radiance map is an array (a layer per roughness) or one texture (a mip per roughness), as the project
+		// sets it for Godot's own shaders.
+		const String defines = RendererSceneRenderRD::get_singleton()->is_using_radiance_octmap_array() ? "#define SKY_OCTMAP_ARRAY\n" : "";
+		const String source = String(SHADERS[i]).replace("@WORLD@", WORLD).replace("@COMMON@", defines + COMMON);
 		ERR_FAIL_COND_V_MSG(file->parse_versions_from_text(source) != OK, false, vformat("PhysXGI: %s shader failed to parse.", PASS_NAMES[i]));
 		Ref<RDShaderSPIRV> spirv = file->get_spirv();
 		ERR_FAIL_COND_V(spirv.is_null(), false);
@@ -1712,9 +1779,55 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	data.sun_color[1] = s.sun_color.g * exposure;
 	data.sun_color[2] = s.sun_color.b * exposure;
 	data.sun_color[3] = exposure;
-	data.ambient[0] = s.ambient.r;
-	data.ambient[1] = s.ambient.g;
-	data.ambient[2] = s.ambient.b;
+	// The ambient light every surface patch gets (the environment's ambient colour, when that's its source), and what a
+	// ray that leaves the scene sees: the sky, or the background colour (as Godot draws them, exposure included).
+	RID sky_map;
+	{
+		RendererSceneRenderRD *scene_render = RendererSceneRenderRD::get_singleton();
+		const RID env = p_render_data->get_environment();
+		Color ambient(0, 0, 0);
+		if (env.is_valid()) {
+			if (scene_render->environment_get_ambient_source(env) == RSE::ENV_AMBIENT_SOURCE_COLOR) {
+				ambient = scene_render->environment_get_ambient_light(env).srgb_to_linear() * scene_render->environment_get_ambient_light_energy(env);
+			}
+			const RSE::EnvironmentBG bg = scene_render->environment_get_background(env);
+			const float bg_energy = scene_render->environment_get_bg_energy_multiplier(env);
+			if (bg == RSE::ENV_BG_CLEAR_COLOR || bg == RSE::ENV_BG_COLOR) {
+				const Color c = (bg == RSE::ENV_BG_CLEAR_COLOR ? RSG::texture_storage->get_default_clear_color() : scene_render->environment_get_bg_color(env)).srgb_to_linear() * bg_energy * exposure;
+				data.sky_flat[0] = c.r;
+				data.sky_flat[1] = c.g;
+				data.sky_flat[2] = c.b;
+			} else if (bg == RSE::ENV_BG_SKY) {
+				const RID sky = scene_render->environment_get_sky(env);
+				const RendererRD::SkyRD::Sky *sky_data = sky.is_valid() ? scene_render->get_sky()->get_sky(sky) : nullptr;
+				if (sky_data && sky_data->radiance.is_valid()) {
+					// The radiance map is baked at an exposure of its own (Godot's IBL normalisation).
+					float exposure_ibl = 1.0f;
+					if (p_render_data->get_camera_attributes().is_valid()) {
+						exposure_ibl = exposure * scene_render->environment_get_bg_intensity(env) / MAX(0.001f, scene_render->get_sky()->sky_get_baked_exposure(sky));
+					}
+					sky_map = sky_data->radiance;
+					data.sky[0] = float(scene_render->get_roughness_layers() - 1);
+					data.sky[1] = sky_data->uv_border_size;
+					data.sky[2] = 1.0f - sky_data->uv_border_size * 2.0f;
+					data.sky[3] = bg_energy * exposure_ibl;
+					const Basis to_sky = scene_render->environment_get_sky_orientation(env).inverse();
+					float *rows[3] = { data.sky_x, data.sky_y, data.sky_z };
+					for (int k = 0; k < 3; k++) {
+						rows[k][0] = to_sky.rows[k].x;
+						rows[k][1] = to_sky.rows[k].y;
+						rows[k][2] = to_sky.rows[k].z;
+					}
+				}
+			}
+		}
+		data.ambient[0] = ambient.r;
+		data.ambient[1] = ambient.g;
+		data.ambient[2] = ambient.b;
+	}
+	if (sky_map.is_null()) {
+		sky_map = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererSceneRenderRD::get_singleton()->is_using_radiance_octmap_array() ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	}
 	data.ambient[3] = s.world_distance;
 	data.counts[0] = s.primitive_count;
 	data.counts[1] = s.node_count;
@@ -1834,9 +1947,9 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	current = 1 - current;
 
 	if (s.multi_bounce && s.primitive_count > 0) {
-		_dispatch(rd, PASS_CACHE, { sampled(0, nearest_sampler, depth), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer) }, Size2i(CACHE_ROW, CACHE_SLOTS / CACHE_ROW / 4), nullptr, 0);
+		_dispatch(rd, PASS_CACHE, { sampled(0, nearest_sampler, depth), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, Size2i(CACHE_ROW, CACHE_SLOTS / CACHE_ROW / 4), nullptr, 0);
 	}
-	_dispatch(rd, PASS_TRACE, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer) }, trace_size, nullptr, 0);
+	_dispatch(rd, PASS_TRACE, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, trace_size, nullptr, 0);
 
 	int32_t history[4] = { have_history ? 1 : 0, 0, 0, 0 };
 	_dispatch(rd, PASS_TEMPORAL, { sampled(0, nearest_sampler, trace), sampled(1, linear_sampler, accum[prev]), sampled(2, nearest_sampler, accum_depth[prev]), sampled(3, nearest_sampler, depth), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, accum[current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, accum_depth[current]), sampled(6, linear_sampler, moments[prev]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, moments[current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, variance) }, trace_size, history, sizeof(history));
@@ -1853,7 +1966,7 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 
 	{
 		int32_t size[4] = { reflect_size.x, reflect_size.y, 0, 0 };
-		_dispatch(rd, PASS_REFLECT, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, reflect_trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer) }, reflect_size, size, sizeof(size));
+		_dispatch(rd, PASS_REFLECT, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, reflect_trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, reflect_size, size, sizeof(size));
 		size[2] = have_history ? 1 : 0;
 		_dispatch(rd, PASS_REFLECT_TEMPORAL, { sampled(0, nearest_sampler, reflect_trace), sampled(1, linear_sampler, reflect_accum[prev]), sampled(2, nearest_sampler, reflect_depth[prev]), sampled(3, nearest_sampler, depth), sampled(4, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflect_accum[current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, reflect_depth[current]) }, reflect_size, size, sizeof(size));
 	}

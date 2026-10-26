@@ -1503,10 +1503,6 @@ void PXTGI3D::_publish() {
 	}
 	environment = env;
 	if (env.is_valid()) {
-		if (env->get_ambient_source() == Environment::AMBIENT_SOURCE_COLOR) {
-			s.ambient = env->get_ambient_light_color().srgb_to_linear() * env->get_ambient_light_energy();
-			PhysXGIEffect::set_settings(get_instance_id(), s);
-		}
 		RenderingServer::get_singleton()->environment_set_sdfgi(env->get_rid(), true, 1, 8.0f, RSE::ENV_SDFGI_Y_SCALE_100_PERCENT, false, 0.0f, false, 1.0f, 1.1f, 1.1f);
 	}
 
