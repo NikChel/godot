@@ -76,7 +76,7 @@ layout(set = 0, binding = 9, std140) uniform Frame {
 	vec4 spot_direction[8]; // w: cosine of the cone's half angle
 	vec4 spot_color[8]; // w: attenuation exponent
 	vec4 spot_cone[8]; // x: the cone edge's falloff exponent
-	vec4 reflect; // x: mode (0 Godot's own, 1 screen space, 2 and the shapes), y: roughness cutoff, z: emissives
+	vec4 reflect; // x: mode (0 Godot's own, 1 screen space, 2 and the shapes), y: roughness cutoff, z: emissives, w: the light sources just changed
 	vec4 emit_center[16];
 	vec4 emit_x[16]; // half axes
 	vec4 emit_y[16];
@@ -1260,7 +1260,9 @@ void main() {
 	if (hit >= 0) {
 		arriving = clamp_firefly(world_light(origin + dir * far, wn, hit, depth_tex, color_tex, false, true));
 	}
-	float samples = min(cell.normal.w + 1.0, 32.0);
+	// A cell averages its last 32 samples; while the light sources have just changed (a lamp switched off, an emitter
+	// gone) only its last 4, so the old light doesn't linger for seconds.
+	float samples = min(cell.normal.w + 1.0, f.reflect.w > 0.0 ? 4.0 : 32.0);
 	vec3 incoming = mix(cell.incoming.rgb, arriving, 1.0 / samples);
 	if (any(isnan(incoming))) {
 		incoming = vec3(0.0);
@@ -1736,6 +1738,7 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	data.reflect[0] = (float)s.reflection_mode;
 	data.reflect[1] = s.reflection_cutoff;
 	data.reflect[2] = (float)s.emissive_count;
+	data.reflect[3] = s.light_changed ? 1.0f : 0.0f;
 	for (int i = 0; i < s.emissive_count; i++) {
 		const Vector3 c = s.emissive_center[i];
 		data.emit_center[i][0] = c.x;

@@ -311,6 +311,10 @@ void PXTGI3D::_activate() {
 		RenderingServer::get_singleton()->environment_set_sdfgi_frames_to_update_light(RSE::ENV_SDFGI_UPDATE_LIGHT_IN_16_FRAMES);
 		RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&PXTGI3D::_install));
 	}
+	// What's tracked is found by one walk on the first update, then kept up to date from the tree's signals.
+	tracked_root = ObjectID();
+	get_tree()->connect("node_added", callable_mp(this, &PXTGI3D::_node_added));
+	get_tree()->connect("node_removed", callable_mp(this, &PXTGI3D::_node_removed));
 	set_process_internal(true);
 }
 
@@ -321,6 +325,11 @@ void PXTGI3D::_deactivate() {
 	}
 	active = false;
 	set_process_internal(false);
+	get_tree()->disconnect("node_added", callable_mp(this, &PXTGI3D::_node_added));
+	get_tree()->disconnect("node_removed", callable_mp(this, &PXTGI3D::_node_removed));
+	tracked.clear();
+	looks.clear();
+	tracked_root = ObjectID();
 	_detach();
 	if (--users == 0) {
 		RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&PXTGI3D::_uninstall));
@@ -467,32 +476,26 @@ void body_look(Node *p_body, Color &r_albedo, Color &r_emission) {
 	}
 }
 
-bool is_emissive_mesh(Node *p_node) {
-	MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(p_node);
-	if (mesh == nullptr || Object::cast_to<CollisionObject3D>(p_node->get_parent()) || mesh->get_mesh().is_null()) {
-		return false;
+// Whether the GI keeps track of a node: a light (which ones it uses is chosen each frame, as lights are often hidden
+// and shown rather than added and removed), a reflection probe, a collision shape of a body (an Area3D's are trigger
+// volumes, not surfaces: they neither block nor bounce light) or a mesh outside any body (which gives off light as its
+// bounding box when it's emissive).
+bool is_tracked(const Node *p_node) {
+	if (Object::cast_to<Light3D>(p_node) || Object::cast_to<ReflectionProbe>(p_node)) {
+		return true;
 	}
-	Color albedo, emission;
-	mesh_look(mesh, albedo, emission);
-	return emission.get_luminance() > 0.0f;
+	if (Object::cast_to<CollisionShape3D>(p_node)) {
+		return Object::cast_to<CollisionObject3D>(p_node->get_parent()) && !Object::cast_to<Area3D>(p_node->get_parent());
+	}
+	return Object::cast_to<MeshInstance3D>(p_node) && !Object::cast_to<CollisionObject3D>(p_node->get_parent());
 }
 
-// The shapes that stand in for the geometry (an Area3D's are trigger volumes, not surfaces: they neither block nor
-// bounce light) and every light: which lights the GI uses is chosen each frame, as lights are often hidden and shown
-// rather than added and removed.
-void collect(Node *p_node, LocalVector<Node *> &r_shapes, LocalVector<ObjectID> &r_suns, LocalVector<ObjectID> &r_omnis, LocalVector<ObjectID> &r_spots) {
-	if ((Object::cast_to<CollisionShape3D>(p_node) && Object::cast_to<CollisionObject3D>(p_node->get_parent()) && !Object::cast_to<Area3D>(p_node->get_parent())) || is_emissive_mesh(p_node)) {
-		r_shapes.push_back(p_node);
-	}
-	if (Object::cast_to<DirectionalLight3D>(p_node)) {
-		r_suns.push_back(p_node->get_instance_id());
-	} else if (Object::cast_to<OmniLight3D>(p_node)) {
-		r_omnis.push_back(p_node->get_instance_id());
-	} else if (Object::cast_to<SpotLight3D>(p_node)) {
-		r_spots.push_back(p_node->get_instance_id());
+void collect(Node *p_node, HashSet<ObjectID> &r_tracked) {
+	if (is_tracked(p_node)) {
+		r_tracked.insert(p_node->get_instance_id());
 	}
 	for (int i = 0; i < p_node->get_child_count(); i++) {
-		collect(p_node->get_child(i), r_shapes, r_suns, r_omnis, r_spots);
+		collect(p_node->get_child(i), r_tracked);
 	}
 }
 
@@ -832,40 +835,147 @@ const PXTGI3D::GeometryBlock *PXTGI3D::_geometry_for(const Ref<Shape3D> &p_shape
 	return stored->type ? stored : nullptr;
 }
 
+// What the GI looks at: the scene (in the editor, the scene being edited, not the editor's own nodes).
+Node *PXTGI3D::_scan_root() const {
+	if (Engine::get_singleton()->is_editor_hint() && get_tree()->get_edited_scene_root()) {
+		return get_tree()->get_edited_scene_root();
+	}
+	return get_tree()->get_root();
+}
+
+void PXTGI3D::_track_all(Node *p_root) {
+	tracked.clear();
+	looks.clear();
+	collect(p_root, tracked);
+	tracked_root = p_root->get_instance_id();
+	tracked_changed = true;
+}
+
+void PXTGI3D::_node_added(Node *p_node) {
+	if (tracked_root.is_null() || !is_tracked(p_node)) {
+		return;
+	}
+	const Node *root = ObjectDB::get_instance<Node>(tracked_root);
+	if (root == nullptr || (root != get_tree()->get_root() && !root->is_ancestor_of(p_node))) {
+		return;
+	}
+	tracked.insert(p_node->get_instance_id());
+	tracked_changed = true;
+}
+
+void PXTGI3D::_node_removed(Node *p_node) {
+	if (tracked.erase(p_node->get_instance_id())) {
+		looks.erase(p_node->get_instance_id());
+		tracked_changed = true;
+	}
+}
+
+// A tracked shape's look (its body's mesh) or a mesh's own: albedo, emission.
+Pair<Color, Color> PXTGI3D::_look_of(Node *p_node) const {
+	Pair<Color, Color> look;
+	if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(p_node)) {
+		mesh_look(mesh, look.first, look.second);
+	} else {
+		body_look(p_node->get_parent(), look.first, look.second);
+	}
+	return look;
+}
+
+// The looks of a slice of the tracked shapes and meshes, worked out again: a shape whose look changed is rewritten
+// (r_changed); one that starts or stops giving off light, or a collision shape given another Shape3D, means finding
+// the shapes again.
+void PXTGI3D::_restyle_slice(LocalVector<int> &r_changed) {
+	const uint32_t count = look_order.size();
+	for (uint32_t k = 0; k < count / 60 + 1 && count > 0; k++) {
+		const ObjectID id = look_order[look_cursor++ % count];
+		Node *node = ObjectDB::get_instance<Node>(id);
+		Pair<Color, Color> *known = looks.getptr(id);
+		if (node == nullptr || known == nullptr) {
+			continue;
+		}
+		const Pair<Color, Color> look = _look_of(node);
+		const int *index = entry_of.getptr(id);
+		if (index) {
+			const CollisionShape3D *cs = Object::cast_to<CollisionShape3D>(node);
+			if (cs && (cs->get_shape().is_valid() ? cs->get_shape()->get_instance_id() : ObjectID()) != shapes[*index].shape_resource) {
+				tracked_changed = true;
+			}
+		}
+		if (look.first == known->first && look.second == known->second) {
+			continue;
+		}
+		if ((look.second.get_luminance() > 0.0f) != (known->second.get_luminance() > 0.0f)) {
+			tracked_changed = true;
+		}
+		*known = look;
+		if (index) {
+			shapes[*index].albedo = look.first;
+			shapes[*index].emission = look.second;
+			r_changed.push_back(*index);
+		}
+	}
+}
+
 void PXTGI3D::_rescan() {
+	Node *root = _scan_root();
+	if (root->get_instance_id() != tracked_root) {
+		_track_all(root);
+	}
+	tracked_changed = false;
+	frames_since_rescan = 0;
 	shapes.clear();
 	suns.clear();
 	omnis.clear();
 	spots.clear();
-	LocalVector<Node *> found;
-	// In the editor, the scene being edited (not the editor's own nodes).
-	Node *scan_root = get_tree()->get_root();
-	if (Engine::get_singleton()->is_editor_hint() && get_tree()->get_edited_scene_root()) {
-		scan_root = get_tree()->get_edited_scene_root();
-	}
-	collect(scan_root, found, suns, omnis, spots);
 	probes.clear();
-	for (const Variant &v : scan_root->find_children("*", "ReflectionProbe", true, false)) {
-		probes.push_back(Object::cast_to<Node>(v)->get_instance_id());
-	}
-	for (Node *n : found) {
-		ShapeEntry entry;
-		entry.shape_node = n->get_instance_id();
-		if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(n)) {
-			entry.mesh_proxy = true;
-			mesh_look(mesh, entry.albedo, entry.emission);
-		} else {
-			body_look(n->get_parent(), entry.albedo, entry.emission);
+	look_order.clear();
+	entry_of.clear();
+	for (const ObjectID &id : tracked) {
+		Node *n = ObjectDB::get_instance<Node>(id);
+		if (n == nullptr) {
+			continue;
 		}
-		if (!entry.mesh_proxy) {
+		if (Object::cast_to<DirectionalLight3D>(n)) {
+			suns.push_back(id);
+			continue;
+		} else if (Object::cast_to<OmniLight3D>(n)) {
+			omnis.push_back(id);
+			continue;
+		} else if (Object::cast_to<SpotLight3D>(n)) {
+			spots.push_back(id);
+			continue;
+		} else if (Object::cast_to<ReflectionProbe>(n)) {
+			probes.push_back(id);
+			continue;
+		} else if (Object::cast_to<Light3D>(n)) {
+			continue;
+		}
+		const Pair<Color, Color> *look = looks.getptr(id);
+		if (look == nullptr) {
+			look = &looks.insert(id, _look_of(n))->value;
+		}
+		look_order.push_back(id);
+		ShapeEntry entry;
+		entry.shape_node = id;
+		entry.albedo = look->first;
+		entry.emission = look->second;
+		if (MeshInstance3D *mesh = Object::cast_to<MeshInstance3D>(n)) {
+			// A mesh outside any body only counts while it gives off light.
+			if (mesh->get_mesh().is_null() || entry.emission.get_luminance() <= 0.0f) {
+				continue;
+			}
+			entry.mesh_proxy = true;
+		} else {
 			CollisionShape3D *cs = Object::cast_to<CollisionShape3D>(n);
 			if (cs->get_shape().is_valid()) {
+				entry.shape_resource = cs->get_shape()->get_instance_id();
 				if (const GeometryBlock *block = _geometry_for(cs->get_shape())) {
 					entry.geometry_type = block->type;
 					entry.local_bounds = block->bounds;
 				}
 			}
 		}
+		entry_of.insert(id, shapes.size());
 		shapes.push_back(entry);
 	}
 	body_entries.clear();
@@ -1086,16 +1196,17 @@ static GodotPhysXSpace3D *physx_space(Node3D *p_node) {
 }
 
 // The shapes' records and their tree, refreshed for what changed: a rescan that finds different shapes rebuilds the
-// tree; otherwise only the shapes on bodies PhysX moved are rewritten, placed from the bodies' poses (everything every
-// 30 frames from the nodes, to catch bodies moved outside the simulation and shapes edited, hidden or disabled) and the
-// tree is refit around them, rebuilt after a while of motion to stay tight.
+// tree; otherwise only the shapes on bodies PhysX moved are rewritten, placed from the bodies' poses (and a slice of
+// every shape each frame from its node, to catch bodies moved outside the simulation and shapes edited, hidden or
+// disabled) and the tree is refit around them, rebuilt after a while of motion to stay tight.
 void PXTGI3D::_update_primitives(PhysXGIEffect::Snapshot &r_snapshot) {
 	constexpr int PF = PhysXGIEffect::PRIMITIVE_FLOATS;
 	bool rebuild = false;
-	if (--rescan_in <= 0) {
+	// The shapes found again when tracked nodes came or went, at most every 10 frames (a stream of spawned debris
+	// doesn't rebuild the tree every frame).
+	if (tracked_root.is_null() || (tracked_changed && ++frames_since_rescan >= 10)) {
 		const uint32_t before = shape_signature;
 		_rescan();
-		rescan_in = 60;
 		rebuild = shape_signature != before;
 	}
 	const int n = shapes.size();
@@ -1113,8 +1224,12 @@ void PXTGI3D::_update_primitives(PhysXGIEffect::Snapshot &r_snapshot) {
 		// its node).
 		LocalVector<Pair<int, const GodotPhysXBody3D *>> candidates;
 		GodotPhysXSpace3D *space = physx_space(this);
-		if (--verify_in <= 0 || space == nullptr) {
-			verify_in = 30;
+		LocalVector<int> restyled;
+		_restyle_slice(restyled);
+		for (int i : restyled) {
+			candidates.push_back({ i, nullptr });
+		}
+		if (space == nullptr) {
 			for (int i = 0; i < n; i++) {
 				candidates.push_back({ i, nullptr });
 			}
@@ -1128,6 +1243,11 @@ void PXTGI3D::_update_primitives(PhysXGIEffect::Snapshot &r_snapshot) {
 			}
 			for (int i : proxy_entries) {
 				candidates.push_back({ i, nullptr });
+			}
+			// And a slice of every shape read from its node (all in half a second), for bodies moved outside the
+			// simulation and shapes edited, hidden or disabled.
+			for (int k = 0; k < n / 30 + 1 && n > 0; k++) {
+				candidates.push_back({ int(verify_cursor++ % uint32_t(n)), nullptr });
 			}
 		}
 		float scratch[PF];
@@ -1348,6 +1468,7 @@ void PXTGI3D::_publish() {
 		s.probe_core[i] = core;
 		s.probe_overrides[i] = overrides;
 	}
+	s.light_changed = fresh_frames > 0;
 	PhysXGIEffect::set_settings(get_instance_id(), s);
 	// SDFGI is only the switch that makes surfaces read the GI buffer: on, at its cheapest (one cascade of 8 m cells,
 	// so a moving camera rarely makes it re-voxelize).
@@ -1380,6 +1501,25 @@ void PXTGI3D::_publish() {
 	if (h != last_hash) {
 		last_hash = h;
 		PhysXGIEffect::unsettle();
+	}
+	// The light sources themselves (which and how bright): a lamp switched off or an emitter gone shouldn't glow on in
+	// the radiance cache for seconds. Published from the next frame, for 60 frames.
+	uint32_t sources = hash_murmur3_one_32(s.omni_count | (s.spot_count << 8) | (s.emissive_count << 16));
+	sources = hash_murmur3_one_float(s.sun_color.r + s.sun_color.g * 3.1f + s.sun_color.b * 7.3f, sources);
+	for (int i = 0; i < s.omni_count; i++) {
+		sources = hash_murmur3_one_float(s.omni_color[i].r + s.omni_color[i].g * 3.1f + s.omni_color[i].b * 7.3f, sources);
+	}
+	for (int i = 0; i < s.spot_count; i++) {
+		sources = hash_murmur3_one_float(s.spot_color[i].r + s.spot_color[i].g * 3.1f + s.spot_color[i].b * 7.3f, sources);
+	}
+	for (int i = 0; i < s.emissive_count; i++) {
+		sources = hash_murmur3_one_float(s.emissive_color[i].r + s.emissive_color[i].g * 3.1f + s.emissive_color[i].b * 7.3f, sources);
+	}
+	if (sources != last_sources_hash) {
+		last_sources_hash = sources;
+		fresh_frames = 60;
+	} else if (fresh_frames > 0) {
+		fresh_frames--;
 	}
 }
 

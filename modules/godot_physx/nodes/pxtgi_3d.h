@@ -33,6 +33,7 @@
 #include "physx_gi_effect.h"
 
 #include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
 #include "scene/3d/node_3d.h"
 #include "scene/resources/3d/shape_3d.h"
@@ -66,6 +67,7 @@ class PXTGI3D : public Node3D {
 		Color albedo;
 		Color emission;
 		bool mesh_proxy = false;
+		ObjectID shape_resource; // a collision shape's Shape3D when found: another one means finding the shapes again
 		// Hulls and meshes: their type (4, 5), where their geometry starts in the geometry buffer, their local bounds.
 		int geometry_type = 0;
 		int geometry_a = 0;
@@ -96,11 +98,36 @@ class PXTGI3D : public Node3D {
 	LocalVector<ObjectID> suns; // every DirectionalLight3D: the brightest one drawn on surfaces is the sun, chosen each frame
 	Ref<Environment> environment; // the one whose SDFGI is the switch, given its own settings back on leaving
 	uint32_t last_hash = 0; // what was published last: a change means the GI has to converge again
+	// What gives off light (which lights and emitters, how bright; not where, as moving lamps change it every frame):
+	// a change lets the radiance cache follow quickly for a while.
+	uint32_t last_sources_hash = 0;
+	int fresh_frames = 0;
 	LocalVector<ObjectID> omnis;
 	LocalVector<ObjectID> spots;
 	LocalVector<ObjectID> probes; // ReflectionProbes: where they override the GI, it isn't traced
-	int rescan_in = 0;
 	uint32_t shape_signature = 0; // the shapes found by the last rescan: a change means rebuilding the tree
+
+	// The nodes the GI keeps track of (lights, reflection probes, the collision shapes of bodies, meshes outside any
+	// body): found by one walk of the scene when PXTGI starts, then kept up to date from the scene tree's node_added and
+	// node_removed, so finding the shapes again never walks the whole scene.
+	HashSet<ObjectID> tracked;
+	ObjectID tracked_root; // the node they were found under (the edited scene in the editor); none: walk again
+	bool tracked_changed = true; // a tracked node came or went (or a look or shape changed): find the shapes again
+	int frames_since_rescan = 0;
+	// Each tracked shape's and mesh's look (albedo, emission), worked out once and then a slice of them each frame
+	// (all in about a second), so a changed material reaches the GI without a pause.
+	HashMap<ObjectID, Pair<Color, Color>> looks;
+	LocalVector<ObjectID> look_order;
+	uint32_t look_cursor = 0;
+	HashMap<ObjectID, int> entry_of; // a shape node's index in shapes
+	uint32_t verify_cursor = 0;
+
+	void _track_all(Node *p_root);
+	void _node_added(Node *p_node);
+	void _node_removed(Node *p_node);
+	Node *_scan_root() const;
+	Pair<Color, Color> _look_of(Node *p_node) const;
+	void _restyle_slice(LocalVector<int> &r_changed);
 
 	// Each shape's GPU record and world bounds (in shape order), kept between frames: only what moved is rewritten,
 	// and the tree is refit rather than rebuilt.
@@ -118,7 +145,6 @@ class PXTGI3D : public Node3D {
 	Vector<float> published_nodes;
 	int published_count = 0;
 	uint64_t primitives_version = 0;
-	int verify_in = 0;
 	int moves_since_build = 0;
 
 	void _rescan();

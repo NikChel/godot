@@ -106,6 +106,7 @@ public:
 		Vector3 emissive_axis[MAX_EMISSIVES][3];
 		Color emissive_color[MAX_EMISSIVES];
 		bool multi_bounce = true; // off-screen hits light from the radiance cache
+		bool light_changed = false; // the light sources just changed: the radiance cache follows quickly
 		int reflection_mode = 2; // 0: Godot's own, 1: screen space, 2: screen space then the collision shapes
 		float reflection_cutoff = 0.5f; // rougher surfaces keep Godot's reflection (probes, sky)
 		// Reflection probes that override the GI buffers inside their box (Godot's scene shader replaces them there):
