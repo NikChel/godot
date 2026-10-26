@@ -388,6 +388,18 @@ Color texture_average(const Ref<Texture2D> &p_texture) {
 	return average;
 }
 
+// The metadata names, made once: a StringName from a string looks the name up in the global table each time, and the
+// looks are read again a slice every frame.
+const StringName &meta_albedo() {
+	static const StringName name = "pxtgi_albedo";
+	return name;
+}
+
+const StringName &meta_emission() {
+	static const StringName name = "pxtgi_emission";
+	return name;
+}
+
 // The light a material gives off (linear; emission times its energy, in the units Godot adds it to the frame; an
 // emission texture by its average). A material Godot can't read the glow of (a ShaderMaterial) can say it with a
 // "pxtgi_emission" Color in its metadata.
@@ -395,8 +407,8 @@ Color material_glow(const Ref<Material> &p_material) {
 	if (p_material.is_null()) {
 		return Color(0, 0, 0);
 	}
-	if (p_material->has_meta("pxtgi_emission")) {
-		Color glow = Color(p_material->get_meta("pxtgi_emission")).srgb_to_linear();
+	if (p_material->has_meta(meta_emission())) {
+		Color glow = Color(p_material->get_meta(meta_emission())).srgb_to_linear();
 		glow.a = 1.0f;
 		return glow;
 	}
@@ -446,8 +458,8 @@ void mesh_look(MeshInstance3D *p_mesh, Color &r_albedo, Color &r_emission) {
 	for (int i = 0; i < MAX(surfaces, 1); i++) {
 		const Ref<Material> material = p_mesh->get_active_material(i);
 		const Ref<BaseMaterial3D> base = material;
-		if (!have_albedo && material.is_valid() && material->has_meta("pxtgi_albedo")) {
-			r_albedo = Color(material->get_meta("pxtgi_albedo")).srgb_to_linear();
+		if (!have_albedo && material.is_valid() && material->has_meta(meta_albedo())) {
+			r_albedo = Color(material->get_meta(meta_albedo())).srgb_to_linear();
 			have_albedo = true;
 		} else if (!have_albedo && base.is_valid()) {
 			r_albedo = base->get_albedo().srgb_to_linear();
@@ -458,8 +470,8 @@ void mesh_look(MeshInstance3D *p_mesh, Color &r_albedo, Color &r_emission) {
 			r_emission = glow;
 		}
 	}
-	if (p_mesh->has_meta("pxtgi_emission")) {
-		r_emission = Color(p_mesh->get_meta("pxtgi_emission")).srgb_to_linear();
+	if (p_mesh->has_meta(meta_emission())) {
+		r_emission = Color(p_mesh->get_meta(meta_emission())).srgb_to_linear();
 		r_emission.a = 1.0f;
 	}
 }
@@ -475,8 +487,8 @@ MeshInstance3D *first_mesh_child(const Node *p_node) {
 }
 
 // The look of the mesh a body belongs to: the first mesh under it, else the mesh it sits under (a model with its
-// collision body as a child), else the first mesh beside it, else a neutral grey. A "pxtgi_albedo" or "pxtgi_emission"
-// Color in the body's own metadata says it outright.
+// collision body as a child), else the first mesh beside it (in a group of up to 8), else a neutral grey. A
+// "pxtgi_albedo" or "pxtgi_emission" Color in the body's own metadata says it outright.
 void body_look(Node *p_body, Color &r_albedo, Color &r_emission) {
 	r_albedo = Color(0.5, 0.5, 0.5);
 	r_emission = Color(0, 0, 0);
@@ -484,17 +496,19 @@ void body_look(Node *p_body, Color &r_albedo, Color &r_emission) {
 	if (mesh == nullptr) {
 		mesh = Object::cast_to<MeshInstance3D>(p_body->get_parent());
 	}
-	if (mesh == nullptr && p_body->get_parent()) {
+	// A mesh beside it only in a small group (a model node holding its mesh and its body), not among the thousands of
+	// bodies a spawner keeps under one node.
+	if (mesh == nullptr && p_body->get_parent() && p_body->get_parent()->get_child_count() <= 8) {
 		mesh = first_mesh_child(p_body->get_parent());
 	}
 	if (mesh) {
 		mesh_look(mesh, r_albedo, r_emission);
 	}
-	if (p_body->has_meta("pxtgi_albedo")) {
-		r_albedo = Color(p_body->get_meta("pxtgi_albedo")).srgb_to_linear();
+	if (p_body->has_meta(meta_albedo())) {
+		r_albedo = Color(p_body->get_meta(meta_albedo())).srgb_to_linear();
 	}
-	if (p_body->has_meta("pxtgi_emission")) {
-		r_emission = Color(p_body->get_meta("pxtgi_emission")).srgb_to_linear();
+	if (p_body->has_meta(meta_emission())) {
+		r_emission = Color(p_body->get_meta(meta_emission())).srgb_to_linear();
 		r_emission.a = 1.0f;
 	}
 }
