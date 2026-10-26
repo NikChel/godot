@@ -1575,7 +1575,6 @@ PhysXGIEffect::~PhysXGIEffect() {
 	if (rd == nullptr) {
 		return;
 	}
-	_free_targets(rd);
 	for (int i = 0; i < PASS_MAX; i++) {
 		if (pipelines[i].is_valid()) {
 			rd->free_rid(pipelines[i]);
@@ -1637,10 +1636,14 @@ bool PhysXGIEffect::_ensure(RenderingDevice *p_rd) {
 	return true;
 }
 
-void PhysXGIEffect::_free_targets(RenderingDevice *p_rd) {
+void PhysXGIView::free_data() {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
 	for (RID *r : { &trace, &accum[0], &accum[1], &accum_depth[0], &accum_depth[1], &moments[0], &moments[1], &variance, &filtered[0], &filtered[1], &filtered_variance[0], &filtered_variance[1], &reflect_trace, &reflect_accum[0], &reflect_accum[1], &reflect_depth[0], &reflect_depth[1] }) {
 		if (r->is_valid()) {
-			p_rd->free_rid(*r);
+			rd->free_rid(*r);
 			*r = RID();
 		}
 	}
@@ -1648,11 +1651,11 @@ void PhysXGIEffect::_free_targets(RenderingDevice *p_rd) {
 	have_history = false;
 }
 
-void PhysXGIEffect::_ensure_targets(RenderingDevice *p_rd, const Size2i &p_frame) {
+void PhysXGIView::ensure(RenderingDevice *p_rd, const Size2i &p_frame) {
 	if (p_frame == targets_for && trace.is_valid()) {
 		return;
 	}
-	_free_targets(p_rd);
+	free_data();
 	targets_for = p_frame;
 	trace_size = Size2i(MAX(p_frame.x / 4, 1), MAX(p_frame.y / 4, 1));
 	RD::TextureFormat tf;
@@ -1736,7 +1739,15 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	const RID color = buffers->get_internal_texture(); // still last frame's image: the opaque pass hasn't run yet
 	const RD::TextureFormat out_format = rd->texture_get_format(ambient);
 	const Size2i out_size(out_format.width, out_format.height);
-	_ensure_targets(rd, size);
+	// This viewport's targets and history.
+	static const StringName view_scope = "pxtgi";
+	Ref<PhysXGIView> view = buffers->has_custom_data(view_scope) ? Ref<PhysXGIView>(buffers->get_custom_data(view_scope)) : Ref<PhysXGIView>();
+	if (view.is_null()) {
+		view.instantiate();
+		buffers->set_custom_data(view_scope, view);
+	}
+	PhysXGIView &v = *view.ptr();
+	v.ensure(rd, size);
 
 	const Transform3D cam_transform = scene->get_cam_transform();
 	// The raw projection, as Godot's own GI step uses it: get_cam_projection() already has the depth correction (and TAA
@@ -1744,27 +1755,27 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	const RenderSceneDataRD *scene_rd = Object::cast_to<RenderSceneDataRD>(scene);
 	ERR_FAIL_NULL(scene_rd);
 	const Projection projection = scene_rd->cam_projection;
-	if (have_history && (cam_transform != prev_cam_transform || projection != prev_projection)) {
+	if (v.have_history && (cam_transform != v.prev_cam_transform || projection != v.prev_projection)) {
 		unsettle();
 	}
-	if (!have_history) {
-		prev_cam_transform = cam_transform;
-		prev_projection = projection;
+	if (!v.have_history) {
+		v.prev_cam_transform = cam_transform;
+		v.prev_projection = projection;
 	}
 	FrameData data = {};
 	RendererRD::MaterialStorage::store_transform(cam_transform, data.view_to_world);
 	RendererRD::MaterialStorage::store_transform(cam_transform.affine_inverse(), data.world_to_view);
-	RendererRD::MaterialStorage::store_transform(prev_cam_transform.affine_inverse(), data.world_to_prev_view);
+	RendererRD::MaterialStorage::store_transform(v.prev_cam_transform.affine_inverse(), data.world_to_prev_view);
 	projection_info(projection, size, data.proj_info);
-	projection_info(prev_projection, size, data.prev_proj_info);
+	projection_info(v.prev_projection, size, data.prev_proj_info);
 	data.clip[0] = projection.get_z_near();
 	data.clip[1] = projection.get_z_far();
-	data.clip[2] = prev_projection.get_z_near();
-	data.clip[3] = prev_projection.get_z_far();
+	data.clip[2] = v.prev_projection.get_z_near();
+	data.clip[3] = v.prev_projection.get_z_far();
 	data.sizes[0] = size.x;
 	data.sizes[1] = size.y;
-	data.sizes[2] = trace_size.x;
-	data.sizes[3] = trace_size.y;
+	data.sizes[2] = v.trace_size.x;
+	data.sizes[3] = v.trace_size.y;
 	data.misc[0] = (float)(frame++ % 4096);
 	data.misc[1] = s.max_distance;
 	data.misc[2] = s.intensity;
@@ -1943,39 +1954,39 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	auto sampled = [&](int p_binding, const RID &p_sampler, const RID &p_texture) {
 		return RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, p_binding, Vector<RID>({ p_sampler, p_texture }));
 	};
-	const int prev = current;
-	current = 1 - current;
+	const int prev = v.current;
+	v.current = 1 - v.current;
 
 	if (s.multi_bounce && s.primitive_count > 0) {
 		_dispatch(rd, PASS_CACHE, { sampled(0, nearest_sampler, depth), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, Size2i(CACHE_ROW, CACHE_SLOTS / CACHE_ROW / 4), nullptr, 0);
 	}
-	_dispatch(rd, PASS_TRACE, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, trace_size, nullptr, 0);
+	_dispatch(rd, PASS_TRACE, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, v.trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, v.trace_size, nullptr, 0);
 
-	int32_t history[4] = { have_history ? 1 : 0, 0, 0, 0 };
-	_dispatch(rd, PASS_TEMPORAL, { sampled(0, nearest_sampler, trace), sampled(1, linear_sampler, accum[prev]), sampled(2, nearest_sampler, accum_depth[prev]), sampled(3, nearest_sampler, depth), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, accum[current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, accum_depth[current]), sampled(6, linear_sampler, moments[prev]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, moments[current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, variance) }, trace_size, history, sizeof(history));
+	int32_t history[4] = { v.have_history ? 1 : 0, 0, 0, 0 };
+	_dispatch(rd, PASS_TEMPORAL, { sampled(0, nearest_sampler, v.trace), sampled(1, linear_sampler, v.accum[prev]), sampled(2, nearest_sampler, v.accum_depth[prev]), sampled(3, nearest_sampler, depth), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, v.accum[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.accum_depth[v.current]), sampled(6, linear_sampler, v.moments[prev]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, v.moments[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, v.variance) }, v.trace_size, history, sizeof(history));
 
 	// Three filter passes, the taps 1, 2 and 4 texels apart.
-	RID light_in = accum[current];
-	RID variance_in = variance;
+	RID light_in = v.accum[v.current];
+	RID variance_in = v.variance;
 	for (int i = 0; i < 3; i++) {
 		int32_t step[4] = { 1 << i, 0, 0, 0 };
-		_dispatch(rd, PASS_ATROUS, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, variance_in), sampled(2, nearest_sampler, accum_depth[current]), sampled(3, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, filtered[i & 1]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, filtered_variance[i & 1]) }, trace_size, step, sizeof(step));
-		light_in = filtered[i & 1];
-		variance_in = filtered_variance[i & 1];
+		_dispatch(rd, PASS_ATROUS, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, variance_in), sampled(2, nearest_sampler, v.accum_depth[v.current]), sampled(3, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, v.filtered[i & 1]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.filtered_variance[i & 1]) }, v.trace_size, step, sizeof(step));
+		light_in = v.filtered[i & 1];
+		variance_in = v.filtered_variance[i & 1];
 	}
 
 	{
-		int32_t size[4] = { reflect_size.x, reflect_size.y, 0, 0 };
-		_dispatch(rd, PASS_REFLECT, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, reflect_trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, reflect_size, size, sizeof(size));
-		size[2] = have_history ? 1 : 0;
-		_dispatch(rd, PASS_REFLECT_TEMPORAL, { sampled(0, nearest_sampler, reflect_trace), sampled(1, linear_sampler, reflect_accum[prev]), sampled(2, nearest_sampler, reflect_depth[prev]), sampled(3, nearest_sampler, depth), sampled(4, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflect_accum[current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, reflect_depth[current]) }, reflect_size, size, sizeof(size));
+		int32_t size[4] = { v.reflect_size.x, v.reflect_size.y, 0, 0 };
+		_dispatch(rd, PASS_REFLECT, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, v.reflect_trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, v.reflect_size, size, sizeof(size));
+		size[2] = v.have_history ? 1 : 0;
+		_dispatch(rd, PASS_REFLECT_TEMPORAL, { sampled(0, nearest_sampler, v.reflect_trace), sampled(1, linear_sampler, v.reflect_accum[prev]), sampled(2, nearest_sampler, v.reflect_depth[prev]), sampled(3, nearest_sampler, depth), sampled(4, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.reflect_accum[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, v.reflect_depth[v.current]) }, v.reflect_size, size, sizeof(size));
 	}
 
-	int32_t out[4] = { out_size.x, out_size.y, reflect_size.x, reflect_size.y };
-	_dispatch(rd, PASS_RESOLVE, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, accum_depth[current]), sampled(2, nearest_sampler, depth), sampled(3, nearest_sampler, normal), sampled(6, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ambient), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflection), sampled(7, nearest_sampler, reflect_accum[current]), sampled(8, nearest_sampler, reflect_depth[current]) }, out_size, out, sizeof(out));
+	int32_t out[4] = { out_size.x, out_size.y, v.reflect_size.x, v.reflect_size.y };
+	_dispatch(rd, PASS_RESOLVE, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, v.accum_depth[v.current]), sampled(2, nearest_sampler, depth), sampled(3, nearest_sampler, normal), sampled(6, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ambient), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflection), sampled(7, nearest_sampler, v.reflect_accum[v.current]), sampled(8, nearest_sampler, v.reflect_depth[v.current]) }, out_size, out, sizeof(out));
 
 	rd->capture_timestamp("PXTGI end");
-	have_history = true;
-	prev_cam_transform = cam_transform;
-	prev_projection = projection;
+	v.have_history = true;
+	v.prev_cam_transform = cam_transform;
+	v.prev_projection = projection;
 }

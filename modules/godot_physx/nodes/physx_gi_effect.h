@@ -35,6 +35,7 @@
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
 #include "scene/resources/compositor.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 #include "servers/rendering/rendering_device.h"
 
 #include <atomic>
@@ -42,6 +43,36 @@
 class Camera3D;
 class World3D;
 class RenderData;
+
+// One viewport's GI targets and history, kept on its render buffers (and freed with them): each viewport of the world
+// (a minimap, a camera feed, split screen) keeps its own, rather than all of them sharing one and wiping it.
+class PhysXGIView : public RenderBufferCustomDataRD {
+	GDCLASS(PhysXGIView, RenderBufferCustomDataRD);
+
+public:
+	RID trace; // trace size: this frame's rays (premultiplied light, hit fraction)
+	RID accum[2]; // trace size: accumulated over frames, ping-ponged
+	RID accum_depth[2]; // trace size: the linear depth each accumulated texel was for
+	RID moments[2]; // trace size: brightness mean, its square's mean, and how many frames the history holds
+	RID variance; // trace size: how noisy each accumulated texel still is
+	RID filtered[2]; // trace size: the edge-aware filter's passes, ping-ponged
+	RID filtered_variance[2];
+	RID reflect_trace; // half size: this frame's reflection rays (light, found)
+	RID reflect_accum[2]; // half size: accumulated, ping-ponged
+	RID reflect_depth[2];
+	Size2i reflect_size;
+	Size2i trace_size;
+	Size2i targets_for;
+	int current = 0;
+	bool have_history = false;
+	Transform3D prev_cam_transform;
+	Projection prev_projection;
+
+	void ensure(RenderingDevice *p_rd, const Size2i &p_frame);
+	void configure(RenderSceneBuffersRD *p_render_buffers) override {}
+	void free_data() override;
+	~PhysXGIView() { free_data(); }
+};
 
 // PXTGI's GPU side, computed before the opaque pass (PRE_OPAQUE) and written into Godot's per-pixel GI buffer, which
 // every Forward+ surface shader multiplies by its albedo (PXTGI3D stops Godot's own GI step from overwriting it). Rays
@@ -149,36 +180,15 @@ private:
 	uint64_t geometry_uploaded = UINT64_MAX;
 	bool failed = false;
 
-	RID trace; // trace size: this frame's rays (premultiplied light, hit fraction)
-	RID accum[2]; // trace size: accumulated over frames, ping-ponged
-	RID accum_depth[2]; // trace size: the linear depth each accumulated texel was for
-	RID moments[2]; // trace size: brightness mean, its square's mean, and how many frames the history holds
-	RID variance; // trace size: how noisy each accumulated texel still is
-	RID filtered[2]; // trace size: the edge-aware filter's passes, ping-ponged
-	RID filtered_variance[2];
-	RID reflect_trace; // half size: this frame's reflection rays (light, found)
-	RID reflect_accum[2]; // half size: accumulated, ping-ponged
-	RID reflect_depth[2];
-	Size2i reflect_size;
-
 	// The radiance cache: surface patches the off-screen rays hit, hashed by position (cells growing with distance from
 	// the camera) and facing; each holds the light leaving it, bounce light included, refined a ray per frame.
 	static constexpr int CACHE_SLOTS = 1 << 17;
 	static constexpr int CACHE_ROW = 512; // the update pass walks the slots as a CACHE_ROW wide grid
 	RID cache_keys;
 	RID cache_cells;
-	int current = 0;
-	bool have_history = false;
-	Size2i trace_size;
-	Size2i targets_for;
-
-	Transform3D prev_cam_transform;
-	Projection prev_projection;
 	uint32_t frame = 0;
 
 	bool _ensure(RenderingDevice *p_rd);
-	void _ensure_targets(RenderingDevice *p_rd, const Size2i &p_frame);
-	void _free_targets(RenderingDevice *p_rd);
 	void _dispatch(RenderingDevice *p_rd, int p_pass, const Vector<RD::Uniform> &p_uniforms, const Size2i &p_size, const void *p_push, uint32_t p_push_size);
 	void _render(int p_callback_type, const RenderData *p_render_data);
 
