@@ -43,6 +43,7 @@
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/3d/physics/area_3d.h"
 #include "scene/3d/physics/collision_object_3d.h"
 #include "scene/3d/physics/collision_shape_3d.h"
 #include "scene/3d/reflection_probe.h"
@@ -323,6 +324,10 @@ void PXTGI3D::_deactivate() {
 	_detach();
 	if (--users == 0) {
 		RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&PXTGI3D::_uninstall));
+		// SDFGI's probe ray count and light update rate are global: the project's own back (as Godot reads them at
+		// start), or a scene using SDFGI after PXTGI would keep the cheapest ones set above.
+		RenderingServer::get_singleton()->environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount(CLAMP(int(GLOBAL_GET("rendering/global_illumination/sdfgi/probe_ray_count")), 0, int(RSE::ENV_SDFGI_RAY_COUNT_MAX) - 1)));
+		RenderingServer::get_singleton()->environment_set_sdfgi_frames_to_update_light(RSE::EnvironmentSDFGIFramesToUpdateLight(CLAMP(int(GLOBAL_GET("rendering/global_illumination/sdfgi/frames_to_update_lights")), 0, int(RSE::ENV_SDFGI_UPDATE_LIGHT_MAX) - 1)));
 	}
 }
 
@@ -472,22 +477,64 @@ bool is_emissive_mesh(Node *p_node) {
 	return emission.get_luminance() > 0.0f;
 }
 
-void collect(Node *p_node, LocalVector<Node *> &r_shapes, ObjectID &r_sun, LocalVector<ObjectID> &r_omnis, LocalVector<ObjectID> &r_spots) {
-	if ((Object::cast_to<CollisionShape3D>(p_node) && Object::cast_to<CollisionObject3D>(p_node->get_parent())) || is_emissive_mesh(p_node)) {
+// The shapes that stand in for the geometry (an Area3D's are trigger volumes, not surfaces: they neither block nor
+// bounce light) and every light: which lights the GI uses is chosen each frame, as lights are often hidden and shown
+// rather than added and removed.
+void collect(Node *p_node, LocalVector<Node *> &r_shapes, LocalVector<ObjectID> &r_suns, LocalVector<ObjectID> &r_omnis, LocalVector<ObjectID> &r_spots) {
+	if ((Object::cast_to<CollisionShape3D>(p_node) && Object::cast_to<CollisionObject3D>(p_node->get_parent()) && !Object::cast_to<Area3D>(p_node->get_parent())) || is_emissive_mesh(p_node)) {
 		r_shapes.push_back(p_node);
 	}
-	if (r_sun.is_null() && Object::cast_to<DirectionalLight3D>(p_node)) {
-		r_sun = p_node->get_instance_id();
-	}
-	if (Object::cast_to<OmniLight3D>(p_node) && r_omnis.size() < (uint32_t)PhysXGIEffect::Snapshot::MAX_OMNIS) {
+	if (Object::cast_to<DirectionalLight3D>(p_node)) {
+		r_suns.push_back(p_node->get_instance_id());
+	} else if (Object::cast_to<OmniLight3D>(p_node)) {
 		r_omnis.push_back(p_node->get_instance_id());
-	}
-	if (Object::cast_to<SpotLight3D>(p_node) && r_spots.size() < (uint32_t)PhysXGIEffect::Snapshot::MAX_SPOTS) {
+	} else if (Object::cast_to<SpotLight3D>(p_node)) {
 		r_spots.push_back(p_node->get_instance_id());
 	}
 	for (int i = 0; i < p_node->get_child_count(); i++) {
-		collect(p_node->get_child(i), r_shapes, r_sun, r_omnis, r_spots);
+		collect(p_node->get_child(i), r_shapes, r_suns, r_omnis, r_spots);
 	}
+}
+
+// How much of a light Godot draws for a camera at p_eye: none when hidden or off, and with distance fade on, fading
+// out past its begin distance as Godot's renderer does.
+float light_presence(const Light3D *p_light, const Vector3 &p_eye) {
+	if (p_light == nullptr || !p_light->is_visible_in_tree() || p_light->get_param(Light3D::PARAM_ENERGY) <= 0.0f) {
+		return 0.0f;
+	}
+	if (!p_light->is_distance_fade_enabled()) {
+		return 1.0f;
+	}
+	const float distance = p_light->get_global_position().distance_to(p_eye);
+	const float begin = p_light->get_distance_fade_begin();
+	if (distance <= begin) {
+		return 1.0f;
+	}
+	return Math::smoothstep(0.0f, 1.0f, 1.0f - (distance - begin) / MAX(float(p_light->get_distance_fade_length()), 0.001f));
+}
+
+// Up to p_max of the lights Godot draws, those whose reach (distance less range) comes nearest p_eye first, each with
+// how much of it is drawn.
+LocalVector<Pair<Light3D *, float>> nearest_lights(const LocalVector<ObjectID> &p_lights, const Vector3 &p_eye, int p_max) {
+	LocalVector<Pair<float, Pair<Light3D *, float>>> found;
+	for (const ObjectID &id : p_lights) {
+		Light3D *light = ObjectDB::get_instance<Light3D>(id);
+		const float presence = light_presence(light, p_eye);
+		if (presence <= 0.0f) {
+			continue;
+		}
+		const float gap = MAX(light->get_global_position().distance_to(p_eye) - float(light->get_param(Light3D::PARAM_RANGE)), 0.0f);
+		found.push_back(Pair<float, Pair<Light3D *, float>>(gap, Pair<Light3D *, float>(light, presence)));
+	}
+	if (found.size() > uint32_t(p_max)) {
+		found.sort_custom<PairSort<float, Pair<Light3D *, float>>>();
+		found.resize(p_max);
+	}
+	LocalVector<Pair<Light3D *, float>> chosen;
+	for (const Pair<float, Pair<Light3D *, float>> &f : found) {
+		chosen.push_back(f.second);
+	}
+	return chosen;
 }
 
 struct BuildItem {
@@ -787,7 +834,7 @@ const PXTGI3D::GeometryBlock *PXTGI3D::_geometry_for(const Ref<Shape3D> &p_shape
 
 void PXTGI3D::_rescan() {
 	shapes.clear();
-	sun = ObjectID();
+	suns.clear();
 	omnis.clear();
 	spots.clear();
 	LocalVector<Node *> found;
@@ -796,7 +843,7 @@ void PXTGI3D::_rescan() {
 	if (Engine::get_singleton()->is_editor_hint() && get_tree()->get_edited_scene_root()) {
 		scan_root = get_tree()->get_edited_scene_root();
 	}
-	collect(scan_root, found, sun, omnis, spots);
+	collect(scan_root, found, suns, omnis, spots);
 	probes.clear();
 	for (const Variant &v : scan_root->find_children("*", "ReflectionProbe", true, false)) {
 		probes.push_back(Object::cast_to<Node>(v)->get_instance_id());
@@ -1210,9 +1257,9 @@ void PXTGI3D::_publish() {
 	s.reflection_cutoff = reflection_cutoff;
 
 	_update_primitives(s);
+	const Camera3D *camera = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
+	const Vector3 eye = camera ? camera->get_global_position() : get_global_position();
 	{
-		const Camera3D *camera = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
-		const Vector3 eye = camera ? camera->get_global_position() : get_global_position();
 		LocalVector<Pair<float, int>> near;
 		for (int i : emissive_entries) {
 			Transform3D frame;
@@ -1244,38 +1291,38 @@ void PXTGI3D::_publish() {
 	s.geometry = geometry;
 	s.geometry_version = geometry_version;
 
-	DirectionalLight3D *light = ObjectDB::get_instance<DirectionalLight3D>(sun);
-	if (light && light->is_visible_in_tree()) {
-		s.sun_direction = light->get_global_transform().basis.get_column(2).normalized();
-		s.sun_color = light_strength(light);
-	} else {
-		s.sun_color = Color(0, 0, 0);
-	}
-	s.omni_count = 0;
-	for (const ObjectID &id : omnis) {
-		OmniLight3D *omni = ObjectDB::get_instance<OmniLight3D>(id);
-		if (omni == nullptr || !omni->is_visible_in_tree()) {
+	// The sun: the brightest directional light Godot draws on surfaces (a hidden one, or a sky-only moon, isn't).
+	s.sun_color = Color(0, 0, 0);
+	for (const ObjectID &id : suns) {
+		DirectionalLight3D *light = ObjectDB::get_instance<DirectionalLight3D>(id);
+		if (light_presence(light, eye) <= 0.0f || light->get_sky_mode() == DirectionalLight3D::SKY_MODE_SKY_ONLY) {
 			continue;
 		}
+		const Color color = light_strength(light);
+		if (color.get_luminance() > s.sun_color.get_luminance()) {
+			s.sun_direction = light->get_global_transform().basis.get_column(2).normalized();
+			s.sun_color = color;
+		}
+	}
+	s.omni_count = 0;
+	for (const Pair<Light3D *, float> &l : nearest_lights(omnis, eye, PhysXGIEffect::Snapshot::MAX_OMNIS)) {
+		const OmniLight3D *omni = static_cast<OmniLight3D *>(l.first);
 		const int i = s.omni_count++;
 		s.omni_position[i] = omni->get_global_position();
 		s.omni_inv_range[i] = 1.0f / MAX(omni->get_param(Light3D::PARAM_RANGE), 0.001f);
-		s.omni_color[i] = light_strength(omni);
+		s.omni_color[i] = light_strength(omni) * l.second;
 		s.omni_attenuation[i] = omni->get_param(Light3D::PARAM_ATTENUATION);
 	}
 	s.spot_count = 0;
-	for (const ObjectID &id : spots) {
-		SpotLight3D *spot = ObjectDB::get_instance<SpotLight3D>(id);
-		if (spot == nullptr || !spot->is_visible_in_tree()) {
-			continue;
-		}
+	for (const Pair<Light3D *, float> &l : nearest_lights(spots, eye, PhysXGIEffect::Snapshot::MAX_SPOTS)) {
+		const SpotLight3D *spot = static_cast<SpotLight3D *>(l.first);
 		const int i = s.spot_count++;
 		const Transform3D xf = spot->get_global_transform();
 		s.spot_position[i] = xf.origin;
 		s.spot_inv_range[i] = 1.0f / MAX(spot->get_param(Light3D::PARAM_RANGE), 0.001f);
 		s.spot_direction[i] = -xf.basis.get_column(2).normalized();
 		s.spot_cos_angle[i] = Math::cos(Math::deg_to_rad(spot->get_param(Light3D::PARAM_SPOT_ANGLE)));
-		s.spot_color[i] = light_strength(spot);
+		s.spot_color[i] = light_strength(spot) * l.second;
 		s.spot_attenuation[i] = spot->get_param(Light3D::PARAM_ATTENUATION);
 		s.spot_cone_attenuation[i] = 1.0f / MAX(spot->get_param(Light3D::PARAM_SPOT_ATTENUATION), 0.001f);
 	}
@@ -1304,7 +1351,6 @@ void PXTGI3D::_publish() {
 	PhysXGIEffect::set_settings(get_instance_id(), s);
 	// SDFGI is only the switch that makes surfaces read the GI buffer: on, at its cheapest (one cascade of 8 m cells,
 	// so a moving camera rarely makes it re-voxelize).
-	Camera3D *camera = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
 	Ref<Environment> env = camera && camera->get_environment().is_valid() ? camera->get_environment() : get_world_3d()->get_environment();
 	if (environment.is_valid() && environment != env) {
 		environment->set_sdfgi_enabled(environment->is_sdfgi_enabled());

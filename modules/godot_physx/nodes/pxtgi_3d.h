@@ -93,7 +93,7 @@ class PXTGI3D : public Node3D {
 
 	const GeometryBlock *_geometry_for(const Ref<Shape3D> &p_shape);
 	LocalVector<ShapeEntry> shapes;
-	ObjectID sun;
+	LocalVector<ObjectID> suns; // every DirectionalLight3D: the brightest one drawn on surfaces is the sun, chosen each frame
 	Ref<Environment> environment; // the one whose SDFGI is the switch, given its own settings back on leaving
 	uint32_t last_hash = 0; // what was published last: a change means the GI has to converge again
 	LocalVector<ObjectID> omnis;
