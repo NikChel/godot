@@ -1100,6 +1100,13 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 							resweep = true;
 							continue;
 						}
+						// NikChel: any other initial overlap is swept again too. A sweep stops at
+						// its initial overlap, so whatever lies further along the motion goes
+						// unseen: a narrow capsule grazing a box step's edge while snapping down
+						// was not clamped and went straight through the step below (and the floor).
+						if (pass == 0) {
+							resweep = true;
+						}
 						// Only report a floor-like overlap so move_and_slide keeps a
 						// character grounded. Near-horizontal push-outs here are
 						// almost always a facet edge the capsule is grazing -- just
