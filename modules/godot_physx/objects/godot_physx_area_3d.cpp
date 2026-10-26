@@ -64,6 +64,7 @@ void GodotPhysXArea3D::_destroy_actor() {
 	px_actor->release();
 	px_actor = nullptr;
 	px_shapes.clear(); // released with the actor
+	poll_bounds_dirty = true;
 }
 
 // A new (unattached) trigger shape for entry `p_idx`, or nullptr. The caller attaches + releases it.
@@ -95,6 +96,7 @@ bool GodotPhysXArea3D::_edit_shape_in_place(uint32_t p_idx) {
 	if (!px_actor || !space || !space->get_px_scene()) {
 		return false;
 	}
+	poll_bounds_dirty = true;
 	if (px_shapes.size() < shapes.size()) {
 		const uint32_t old_size = px_shapes.size();
 		px_shapes.resize(shapes.size());
@@ -412,12 +414,21 @@ void GodotPhysXArea3D::report_body_overlap(GodotPhysXBody3D *p_body, int p_body_
 }
 
 void GodotPhysXArea3D::refresh_poll_bounds() {
+	// Unchanged while the actor stays where they were read and its shapes weren't edited (_build_actor and
+	// _edit_shape_in_place mark them dirty): re-reading every shape's world bounds of thousands of resting areas each
+	// step was most of the polling's cost.
+	if (px_actor && !poll_bounds_dirty && px_actor->getGlobalPose() == poll_pose) {
+		return;
+	}
 	poll_aabb_valid = false;
 	poll_shapes.clear();
 	poll_shape_aabbs.clear();
 	if (!px_actor) {
+		poll_bounds_dirty = true;
 		return;
 	}
+	poll_bounds_dirty = false;
+	poll_pose = px_actor->getGlobalPose();
 	const PxU32 nb = px_actor->getNbShapes();
 	poll_shapes.resize(nb);
 	poll_shape_aabbs.resize(nb);
@@ -452,8 +463,23 @@ void GodotPhysXArea3D::poll_area_overlap(GodotPhysXArea3D *p_other) {
 	// Exact tests only where the world bounds (refreshed once per step by the space) meet: the actor's first, then
 	// each shape pair's. (Testing every shape pair of every monitoring x monitorable area each step was the cost:
 	// 28 rock-wake areas of ~80 shapes each x 111 monitorable areas = 30+ ms a step.)
+	const bool bounds_meet = poll_aabb_valid && p_other->poll_aabb_valid && poll_aabb.intersects(p_other->poll_aabb);
+	if (!bounds_meet) {
+		// Apart, and nothing touching from before to report leaving: nothing to do (most pairs, every step).
+		const RID other = p_other->get_self();
+		bool was_touching = false;
+		for (const AreaOverlapKey &key : touching_areas) {
+			if (key.other_area_rid == other) {
+				was_touching = true;
+				break;
+			}
+		}
+		if (!was_touching) {
+			return;
+		}
+	}
 	HashSet<AreaOverlapKey, AreaOverlapKeyHasher> touching_now;
-	if (poll_aabb_valid && p_other->poll_aabb_valid && poll_aabb.intersects(p_other->poll_aabb)) {
+	if (bounds_meet) {
 		const PxTransform self_pose = px_actor->getGlobalPose();
 		const PxTransform other_pose = other_actor->getGlobalPose();
 		const AABB &other_aabb = p_other->poll_aabb;

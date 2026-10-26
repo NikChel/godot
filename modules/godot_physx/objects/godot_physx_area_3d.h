@@ -40,6 +40,8 @@
 #include "core/variant/callable.h"
 #include "servers/physics_3d/physics_server_3d.h"
 
+#include <foundation/PxTransform.h>
+
 namespace physx {
 class PxRigidActor;
 class PxShape;
@@ -160,9 +162,12 @@ private:
 	// edge detection (there is no trigger event to diff against instead).
 	HashSet<AreaOverlapKey, AreaOverlapKeyHasher> touching_areas;
 	// World bounds of the actor + of each of its shapes, refreshed once per step (refresh_poll_bounds) before the
-	// area-vs-area polls: pairs whose bounds don't meet skip the exact overlap test.
+	// area-vs-area polls: pairs whose bounds don't meet skip the exact overlap test. Kept while the actor's pose is
+	// the one they were read at and its shapes weren't edited (most areas never move).
 	AABB poll_aabb;
 	bool poll_aabb_valid = false;
+	bool poll_bounds_dirty = true;
+	physx::PxTransform poll_pose;
 	LocalVector<physx::PxShape *> poll_shapes;
 	LocalVector<AABB> poll_shape_aabbs;
 	HashMap<AreaOverlapKey, AreaOverlapState, AreaOverlapKeyHasher> pending_areas;

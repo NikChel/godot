@@ -499,31 +499,37 @@ void GodotPhysXSpace3D::_detect_area_overlaps() {
 	// O(n^2) over every (monitoring, monitorable) pair per step, but only pairs whose world bounds meet get an exact
 	// shape test (it showed up on a profile: a playtest island with 28 monitoring rock-wake areas went from ~35 ms of
 	// polls a step to a fraction of a millisecond). A real broad-phase (a bounds tree) would be the next lever.
-	// Each area's world bounds once per step (the polls compare bounds before any exact test).
-	bool any = false;
+	// Only the monitorable areas whose layer / mask can meet some monitoring area's are polled (poll_area_overlap
+	// rejects every other pair by the same layer test before it touches any state, so the events are the same), in
+	// the same order; and each one's world bounds are refreshed once per step (kept while it doesn't move).
+	LocalVector<GodotPhysXArea3D *> monitoring;
+	uint32_t monitoring_layers = 0;
+	uint32_t monitoring_masks = 0;
 	for (GodotPhysXArea3D *area : areas) {
 		if (area->wants_area_monitoring()) {
-			any = true;
-			break;
+			monitoring.push_back(area);
+			monitoring_layers |= area->get_collision_layer();
+			monitoring_masks |= area->get_collision_mask();
 		}
 	}
-	if (!any) {
+	if (monitoring.is_empty()) {
 		return;
 	}
+	LocalVector<GodotPhysXArea3D *> polled;
 	for (GodotPhysXArea3D *area : areas) {
-		if (area->wants_area_monitoring() || area->is_monitorable()) {
+		const bool reachable = area->is_monitorable() && ((area->get_collision_layer() & monitoring_masks) || (area->get_collision_mask() & monitoring_layers));
+		if (reachable) {
+			polled.push_back(area);
+		}
+		if (reachable || area->wants_area_monitoring()) {
 			area->refresh_poll_bounds();
 		}
 	}
-	for (GodotPhysXArea3D *area : areas) {
-		if (!area->wants_area_monitoring()) {
-			continue;
-		}
-		for (GodotPhysXArea3D *other : areas) {
-			if (other == area || !other->is_monitorable()) {
-				continue;
+	for (GodotPhysXArea3D *area : monitoring) {
+		for (GodotPhysXArea3D *other : polled) {
+			if (other != area) {
+				area->poll_area_overlap(other);
 			}
-			area->poll_area_overlap(other);
 		}
 	}
 }
