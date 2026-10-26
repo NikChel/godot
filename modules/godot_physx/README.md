@@ -306,23 +306,33 @@ multiple bounces.
 
 - Only what has collision shapes bounces light off screen: box, sphere,
   capsule, cylinder, convex, concave (trimesh) and heightmap shapes.
-  Emissive meshes without a body count as their bounding box.
+  `Area3D` shapes are trigger volumes and take no part. Emissive meshes
+  without a body count as their bounding box (not with `gi_mode` Disabled).
   `WorldBoundaryShape3D` and Blast chunks (`PhysXDestructible3D`) don't take
-  part yet, except as what's on screen.
+  part yet, except as what's on screen. Radiance-cache rays that leave the
+  scene see the sky (or the background colour).
 - A body's look comes from the mesh under it, or else the mesh it sits
-  under (a model with its collision body as a child): its albedo from the
-  first surface with a `StandardMaterial3D`, its glow from its brightest
-  surface. PXTGI can't read a `ShaderMaterial`; give one a `pxtgi_albedo`
-  and/or `pxtgi_emission` Color in its metadata (or `pxtgi_emission` on the
-  `MeshInstance3D` for the whole mesh), or it bounces as neutral grey with
+  under (a model with its collision body as a child), or else the first
+  mesh beside it: its albedo from the first surface with a
+  `StandardMaterial3D`, its glow from its brightest surface. PXTGI can't
+  read a `ShaderMaterial`; give one a `pxtgi_albedo` and/or
+  `pxtgi_emission` Color in its metadata (or put them on the
+  `MeshInstance3D` or the physics body), or it bounces as neutral grey with
   no glow off screen.
+- Lights: the sun is the brightest visible `DirectionalLight3D` that lights
+  surfaces; of omni and spot lights, the 8 of each Godot draws that come
+  nearest the camera, chosen every frame. Nodes added or removed are picked
+  up within a few frames, from the scene tree's signals (no periodic walk
+  of the whole scene).
 - With physical light units on, lights and emission are taken at the
   strength Godot renders them (lumens, lux, `emission_intensity`, the
   camera's exposure).
 - Forward+ only. It uses SDFGI as its switch: while visible it turns SDFGI on
   in the scene's `Environment` at its cheapest settings and replaces its
   light; hidden or removed, the environment's own SDFGI settings are back.
-  The scene needs an `Environment`.
+  The scene needs an `Environment`. While visible, Godot's SDFGI step is
+  replaced in every world, so another `World3D` can't use SDFGI at the same
+  time (VoxelGI alone is fine). Each viewport keeps its own history.
 - Reflections: surfaces at or below `reflection_roughness_cutoff` (`0.5`)
   get traced reflections, rougher ones keep Godot's (probes, sky). Raising
   the cutoff into common materials' roughness costs a lot.
