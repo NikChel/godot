@@ -1796,10 +1796,10 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	{
 		RendererSceneRenderRD *scene_render = RendererSceneRenderRD::get_singleton();
 		const RID env = p_render_data->get_environment();
-		Color ambient(0, 0, 0);
+		Color ambient_color(0, 0, 0);
 		if (env.is_valid()) {
 			if (scene_render->environment_get_ambient_source(env) == RSE::ENV_AMBIENT_SOURCE_COLOR) {
-				ambient = scene_render->environment_get_ambient_light(env).srgb_to_linear() * scene_render->environment_get_ambient_light_energy(env);
+				ambient_color = scene_render->environment_get_ambient_light(env).srgb_to_linear() * scene_render->environment_get_ambient_light_energy(env);
 			}
 			const RSE::EnvironmentBG bg = scene_render->environment_get_background(env);
 			const float bg_energy = scene_render->environment_get_bg_energy_multiplier(env);
@@ -1832,9 +1832,9 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 				}
 			}
 		}
-		data.ambient[0] = ambient.r;
-		data.ambient[1] = ambient.g;
-		data.ambient[2] = ambient.b;
+		data.ambient[0] = ambient_color.r;
+		data.ambient[1] = ambient_color.g;
+		data.ambient[2] = ambient_color.b;
 	}
 	if (sky_map.is_null()) {
 		sky_map = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererSceneRenderRD::get_singleton()->is_using_radiance_octmap_array() ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
