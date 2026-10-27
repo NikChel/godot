@@ -67,10 +67,26 @@ VRS::VRS() {
 			}
 		}
 	}
+
+	single_image = RD::get_singleton()->vrs_get_method() == RD::VRS_METHOD_FRAGMENT_SHADING_RATE && RD::get_singleton()->get_device_api_name() == "D3D12";
+	if (single_image) {
+		Vector<String> image_modes;
+		image_modes.push_back("\n"); // VRS_IMAGE_DEFAULT
+		image_modes.push_back("\n#define SOURCE_ARRAY\n"); // VRS_IMAGE_ARRAY
+
+		image_shader.shader.initialize(image_modes);
+		image_shader.shader_version = image_shader.shader.version_create();
+		for (int i = 0; i < VRS_IMAGE_MAX; i++) {
+			image_shader.pipelines[i] = RD::get_singleton()->compute_pipeline_create(image_shader.shader.version_get_shader(image_shader.shader_version, i));
+		}
+	}
 }
 
 VRS::~VRS() {
 	vrs_shader.shader.version_free(vrs_shader.shader_version);
+	if (single_image) {
+		image_shader.shader.version_free(image_shader.shader_version);
+	}
 }
 
 void VRS::copy_vrs(RID p_source_rd_texture, RID p_dest_framebuffer, bool p_multiview) {
@@ -113,6 +129,30 @@ Size2i VRS::get_vrs_texture_size(const Size2i p_base_size) const {
 	return Size2i((p_base_size.x + vrs_texel_size.x - 1) / vrs_texel_size.x, (p_base_size.y + vrs_texel_size.y - 1) / vrs_texel_size.y);
 }
 
+// Density map of the render target in the unified format (viewport VRS texture or the XR interface's); null — none.
+RID VRS::_get_source_texture(RID p_render_target, int &r_layers) const {
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	RSE::ViewportVRSMode vrs_mode = texture_storage->render_target_get_vrs_mode(p_render_target);
+	RID vrs_texture;
+
+	if (vrs_mode == RSE::VIEWPORT_VRS_TEXTURE) {
+		vrs_texture = texture_storage->render_target_get_vrs_texture(p_render_target);
+#ifndef XR_DISABLED
+	} else if (vrs_mode == RSE::VIEWPORT_VRS_XR) {
+		Ref<XRInterface> interface = XRServer::get_singleton()->get_primary_interface();
+		if (interface.is_valid() && interface->get_vrs_texture_format() == XRInterface::XR_VRS_TEXTURE_FORMAT_UNIFIED) {
+			vrs_texture = interface->get_vrs_texture();
+		}
+#endif // XR_DISABLED
+	}
+
+	if (vrs_texture.is_null()) {
+		return RID();
+	}
+	r_layers = texture_storage->texture_get_layers(vrs_texture);
+	return texture_storage->texture_get_rd_texture(vrs_texture);
+}
+
 void VRS::update_vrs_texture(RID p_vrs_fb, RID p_render_target) {
 	TextureStorage *texture_storage = TextureStorage::get_singleton();
 	RSE::ViewportVRSMode vrs_mode = texture_storage->render_target_get_vrs_mode(p_render_target);
@@ -121,32 +161,11 @@ void VRS::update_vrs_texture(RID p_vrs_fb, RID p_render_target) {
 	if (vrs_mode != RSE::VIEWPORT_VRS_DISABLED && vrs_update_mode != RSE::VIEWPORT_VRS_UPDATE_DISABLED) {
 		RD::get_singleton()->draw_command_begin_label("VRS Setup");
 
-		if (vrs_mode == RSE::VIEWPORT_VRS_TEXTURE) {
-			RID vrs_texture = texture_storage->render_target_get_vrs_texture(p_render_target);
-			if (vrs_texture.is_valid()) {
-				RID rd_texture = texture_storage->texture_get_rd_texture(vrs_texture);
-				int layers = texture_storage->texture_get_layers(vrs_texture);
-				if (rd_texture.is_valid()) {
-					// Copy into our density buffer
-					copy_vrs(rd_texture, p_vrs_fb, layers > 1);
-				}
-			}
-#ifndef XR_DISABLED
-		} else if (vrs_mode == RSE::VIEWPORT_VRS_XR) {
-			Ref<XRInterface> interface = XRServer::get_singleton()->get_primary_interface();
-			if (interface.is_valid() && interface->get_vrs_texture_format() == XRInterface::XR_VRS_TEXTURE_FORMAT_UNIFIED) {
-				RID vrs_texture = interface->get_vrs_texture();
-				if (vrs_texture.is_valid()) {
-					RID rd_texture = texture_storage->texture_get_rd_texture(vrs_texture);
-					int layers = texture_storage->texture_get_layers(vrs_texture);
-
-					if (rd_texture.is_valid()) {
-						// Copy into our density buffer
-						copy_vrs(rd_texture, p_vrs_fb, layers > 1);
-					}
-				}
-			}
-#endif // XR_DISABLED
+		int layers = 1;
+		RID rd_texture = _get_source_texture(p_render_target, layers);
+		if (rd_texture.is_valid()) {
+			// Copy into our density buffer
+			copy_vrs(rd_texture, p_vrs_fb, layers > 1);
 		}
 
 		if (vrs_update_mode == RSE::VIEWPORT_VRS_UPDATE_ONCE) {
@@ -155,4 +174,58 @@ void VRS::update_vrs_texture(RID p_vrs_fb, RID p_render_target) {
 
 		RD::get_singleton()->draw_command_end_label();
 	}
+}
+
+void VRS::update_vrs_image(RID p_vrs_texture, RID p_render_target) {
+	ERR_FAIL_COND(!single_image);
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	RSE::ViewportVRSMode vrs_mode = texture_storage->render_target_get_vrs_mode(p_render_target);
+	RSE::ViewportVRSUpdateMode vrs_update_mode = texture_storage->render_target_get_vrs_update_mode(p_render_target);
+
+	if (vrs_mode != RSE::VIEWPORT_VRS_DISABLED && vrs_update_mode != RSE::VIEWPORT_VRS_UPDATE_DISABLED) {
+		RD::get_singleton()->draw_command_begin_label("VRS Setup");
+
+		int layers = 1;
+		RID rd_texture = _get_source_texture(p_render_target, layers);
+		if (rd_texture.is_valid()) {
+			_copy_vrs_image(rd_texture, layers, p_vrs_texture);
+		}
+
+		if (vrs_update_mode == RSE::VIEWPORT_VRS_UPDATE_ONCE) {
+			texture_storage->render_target_set_vrs_update_mode(p_render_target, RSE::VIEWPORT_VRS_UPDATE_DISABLED);
+		}
+
+		RD::get_singleton()->draw_command_end_label();
+	}
+}
+
+void VRS::_copy_vrs_image(RID p_source_rd_texture, int p_layers, RID p_dest_texture) {
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
+	RD::Uniform u_dest_texture(RD::UNIFORM_TYPE_IMAGE, 0, p_dest_texture);
+
+	int mode = p_layers > 1 ? VRS_IMAGE_ARRAY : VRS_IMAGE_DEFAULT;
+	RID shader = image_shader.shader.version_get_shader(image_shader.shader_version, mode);
+	ERR_FAIL_COND(shader.is_null());
+
+	RD::TextureFormat dest_format = RD::get_singleton()->texture_get_format(p_dest_texture);
+	VRSImagePushConstant push_constant = {};
+	push_constant.size[0] = dest_format.width;
+	push_constant.size[1] = dest_format.height;
+	push_constant.view_count = p_layers;
+	// Same 4x4 limit as copy_vrs.
+	push_constant.max_texel_factor = 2.0;
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, image_shader.pipelines[mode]);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_dest_texture), 1);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VRSImagePushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, dest_format.width, dest_format.height, 1);
+	RD::get_singleton()->compute_list_end();
 }

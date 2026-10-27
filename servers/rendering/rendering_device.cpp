@@ -3627,6 +3627,11 @@ RID RenderingDevice::framebuffer_create_empty(const Size2i &p_size, TextureSampl
 	return id;
 }
 
+// A single-layer VRS attachment may serve all views: D3D12 takes one 2D shading rate image for the whole pass.
+static bool _is_shared_vrs_image(const RenderingDevice::Texture *p_texture, int p_attachment) {
+	return p_attachment != 0 && (p_texture->usage_flags & RenderingDevice::TEXTURE_USAGE_VRS_ATTACHMENT_BIT) && p_texture->layers == 1;
+}
+
 RID RenderingDevice::framebuffer_create(const Vector<RID> &p_texture_attachments, FramebufferFormatID p_format_check, uint32_t p_view_count) {
 	_THREAD_SAFE_METHOD_
 
@@ -3635,7 +3640,7 @@ RID RenderingDevice::framebuffer_create(const Vector<RID> &p_texture_attachments
 	for (int i = 0; i < p_texture_attachments.size(); i++) {
 		Texture *texture = texture_owner.get_or_null(p_texture_attachments[i]);
 
-		ERR_FAIL_COND_V_MSG(texture && texture->layers != p_view_count, RID(), "Layers of our texture doesn't match view count for this framebuffer");
+		ERR_FAIL_COND_V_MSG(texture && texture->layers != p_view_count && !_is_shared_vrs_image(texture, i), RID(), "Layers of our texture doesn't match view count for this framebuffer");
 
 		if (texture != nullptr) {
 			_check_transfer_worker_texture(texture);
@@ -3679,7 +3684,7 @@ RID RenderingDevice::framebuffer_create_multipass(const Vector<RID> &p_texture_a
 			af.usage_flags = AttachmentFormat::UNUSED_ATTACHMENT;
 			trackers.push_back(nullptr);
 		} else {
-			ERR_FAIL_COND_V_MSG(texture->layers != p_view_count, RID(), "Layers of our texture doesn't match view count for this framebuffer");
+			ERR_FAIL_COND_V_MSG(texture->layers != p_view_count && !_is_shared_vrs_image(texture, i), RID(), "Layers of our texture doesn't match view count for this framebuffer");
 
 			_check_transfer_worker_texture(texture);
 
