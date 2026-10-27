@@ -3198,8 +3198,6 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 			depth_stencil_idx++;
 		} else if (i == vrs_index) {
 			fb_info->vrs_attachment = p_attachments[i];
-			// Render pass loops index attachments in pass order, the shading rate image included.
-			fb_info->attachments.push_back(p_attachments[i]);
 		} else {
 			DEV_ASSERT(false);
 		}
@@ -4311,7 +4309,7 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 			} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
 				_transition_subresources(tex_info, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 			} else {
-				DEV_ASSERT(fb_info->attachments[i].id == fb_info->vrs_attachment.id); // Transitioned below.
+				DEV_ASSERT(false);
 			}
 		}
 		if (fb_info->vrs_attachment) {
@@ -4354,8 +4352,6 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 			D3D12_SHADING_RATE_COMBINER_OVERRIDE,
 		};
 		cmd_buf_info->cmd_list_5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, COMBINERS);
-		// Every subpass of a pass with a VRS attachment uses it (RenderingDevice::_render_pass_create).
-		cmd_buf_info->cmd_list_5->RSSetShadingRateImage(((const TextureInfo *)fb_info->vrs_attachment.id)->resource);
 	}
 
 	cmd_buf_info->render_pass_state.current_subpass = UINT32_MAX;
@@ -4601,7 +4597,7 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 
 	if (!barrier_capabilities.enhanced_barriers_supported) {
 		for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
-			if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE && fb_info->attachments[i].id != fb_info->vrs_attachment.id) {
+			if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE) {
 				TextureInfo *tex_info = (TextureInfo *)fb_info->attachments[i].id;
 				if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 					_transition_subresources(tex_info, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -4627,9 +4623,7 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 	_render_pass_enhanced_barriers_flush(p_cmd_buffer);
 
 	for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
-		// The shading rate image is only read by the pass ("don't care" store in Vulkan terms); discarding it would
-		// leave the next pass that uses it (e.g. transparent after opaque) with undefined rates.
-		if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE && fb_info->attachments[i].id != fb_info->vrs_attachment.id) {
+		if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE) {
 			const TextureInfo *tex_info = (const TextureInfo *)fb_info->attachments[i].id;
 			_discard_texture_subresources(tex_info, cmd_buf_info);
 		}
@@ -6212,8 +6206,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 				fsr_capabilities.primitive_supported = true;
 				fsr_capabilities.attachment_supported = true;
 				fsr_capabilities.min_texel_size = Size2i(options6.ShadingRateImageTileSize, options6.ShadingRateImageTileSize);
-				// The image tile size is fixed by the hardware (8 or 16).
-				fsr_capabilities.max_texel_size = fsr_capabilities.min_texel_size;
+				fsr_capabilities.max_texel_size = Size2i(8, 8);
 			}
 		}
 	}

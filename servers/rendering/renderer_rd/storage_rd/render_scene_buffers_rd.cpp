@@ -203,14 +203,7 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 	// VRS (note, our vrs object will only be set if VRS is supported)
 	RID vrs_texture;
 	if (vrs && vrs_mode != RSE::VIEWPORT_VRS_DISABLED) {
-		uint32_t vrs_usage_bits = get_vrs_usage_bits();
-		uint32_t vrs_layers = 0; // One per view.
-		if (vrs->uses_single_image()) {
-			// One 2D image for all views, written by a compute shader (it can't be a render target).
-			vrs_usage_bits &= ~RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
-			vrs_layers = 1;
-		}
-		vrs_texture = create_texture(RB_SCOPE_VRS, RB_TEXTURE, get_vrs_format(), vrs_usage_bits, RD::TEXTURE_SAMPLES_1, vrs->get_vrs_texture_size(internal_size), vrs_layers);
+		vrs_texture = create_texture(RB_SCOPE_VRS, RB_TEXTURE, get_vrs_format(), get_vrs_usage_bits(), RD::TEXTURE_SAMPLES_1, vrs->get_vrs_texture_size(internal_size));
 	}
 
 	// (re-)configure any named buffers

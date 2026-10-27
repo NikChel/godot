@@ -32,7 +32,6 @@
 
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/effects/vrs.glsl.gen.h"
-#include "servers/rendering/renderer_rd/shaders/effects/vrs_image.glsl.gen.h"
 
 namespace RendererRD {
 
@@ -60,30 +59,6 @@ private:
 		PipelineCacheRD pipelines[VRS_MAX];
 	} vrs_shader;
 
-	// Single shading rate image (D3D12): one 2D image for all views, written by a compute shader.
-	enum VRSImageMode {
-		VRS_IMAGE_DEFAULT,
-		VRS_IMAGE_ARRAY,
-		VRS_IMAGE_MAX,
-	};
-
-	struct VRSImagePushConstant {
-		int32_t size[2];
-		int32_t view_count;
-		float max_texel_factor;
-	};
-
-	struct VRSImageShader {
-		VrsImageShaderRD shader;
-		RID shader_version;
-		RID pipelines[VRS_IMAGE_MAX];
-	} image_shader;
-
-	bool single_image = false;
-
-	RID _get_source_texture(RID p_render_target, int &r_layers) const;
-	void _copy_vrs_image(RID p_source_rd_texture, int p_layers, RID p_dest_texture);
-
 public:
 	VRS();
 	~VRS();
@@ -92,11 +67,6 @@ public:
 
 	Size2i get_vrs_texture_size(const Size2i p_base_size) const;
 	void update_vrs_texture(RID p_vrs_fb, RID p_render_target);
-
-	// D3D12 takes one 2D shading rate image per pass, which can't be a render target: the VRS texture is a single layer
-	// (the finest rate of all views), filled by update_vrs_image instead of update_vrs_texture.
-	bool uses_single_image() const { return single_image; }
-	void update_vrs_image(RID p_vrs_texture, RID p_render_target);
 };
 
 } // namespace RendererRD

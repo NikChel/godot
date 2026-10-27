@@ -1317,11 +1317,6 @@ void RendererSceneRenderRD::_update_vrs(Ref<RenderSceneBuffersRD> p_render_buffe
 		if (vrs_mode != RSE::VIEWPORT_VRS_DISABLED) {
 			RID vrs_texture = p_render_buffers->get_texture(RB_SCOPE_VRS, RB_TEXTURE);
 
-			if (vrs->uses_single_image()) {
-				vrs->update_vrs_image(vrs_texture, p_render_buffers->get_render_target());
-				return;
-			}
-
 			// We use get_cache_multipass instead of get_cache_multiview because the default behavior is for
 			// our vrs_texture to be used as the VRS attachment. In this particular case we're writing to it
 			// so it needs to be set as our color attachment
