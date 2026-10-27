@@ -264,6 +264,10 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		if (r.tumb.step(dt)) {
 			r.tumb.log_state();
 		}
+		if (r.rig.is_valid()) {
+			r.anim.step(**r.rig, dt, r.speed); // Скорость снимка прошлого тика
+		}
+		r.arms.step(dt);
 		Node3D *body = r.body_id.is_valid() ? Object::cast_to<Node3D>(ObjectDB::get_instance(r.body_id)) : nullptr;
 		const bool sampled = body != nullptr && _sample(r, r.t_local, p_seek);
 		const Transform3D xf = _space_xf(r.space);
@@ -274,13 +278,19 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		if (sampled && views.is_valid() && r.view >= 0) {
 			const Basis yaw = r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
 			if (r.cross) {
-				views->view_commit(r.view, Transform3D(xf.basis * yaw, world), r.step_lag, r.speed, -1);
+				views->view_commit(r.view, Transform3D(xf.basis * yaw, world), r.step_lag, -1);
 			} else {
-				views->view_commit(r.view, Transform3D(yaw, r.pos), r.step_lag, r.speed, r.space);
+				views->view_commit(r.view, Transform3D(yaw, r.pos), r.step_lag, r.space);
 			}
+			const Quaternion tilt[EnemyRig::ARMS] = { r.arms.tilt(0), r.arms.tilt(1) };
+			views->view_anim(r.view, r.anim, tilt);
 		}
 		if (body != nullptr) {
 			r.tumb.place(_tumble_base(r, body));
+			if (r.rig.is_valid()) { // Корень аватара — как его покажет кадр при доле 1
+				const Basis b = xf.basis * r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
+				r.arms.place(**r.rig, r.anim, Transform3D(b, body->get_global_position() - b.get_column(1).normalized() * r.step_lag));
+			}
 		}
 		StringName e = _pop_due(r, p_seek);
 		while (e != NONE_EVENT) {
@@ -338,6 +348,64 @@ Vector3 EnemyReplicas::replica_tilt(int p_h) const {
 	return reps[p_h].tumb.tilt;
 }
 
+void EnemyReplicas::replica_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_COND(p_rig.is_null() || !p_rig->is_built());
+	Replica &r = reps[p_h];
+	r.rig = p_rig;
+	r.anim = EnemyAnim();
+	r.arms.setup(0, p_arm_l, **p_rig);
+	r.arms.setup(1, p_arm_r, **p_rig);
+}
+
+void EnemyReplicas::replica_play(int p_h, const StringName &p_clip) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Replica &r = reps[p_h];
+	ERR_FAIL_COND(r.rig.is_null());
+	const int c = r.rig->clip_find(p_clip);
+	ERR_FAIL_COND_MSG(c < 0, vformat("EnemyReplicas: no clip %s.", p_clip));
+	r.anim.play(c, EnemyAnim::ACTION_BLEND, true);
+}
+
+bool EnemyReplicas::replica_acting(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	return reps[p_h].anim.acting;
+}
+
+void EnemyReplicas::replica_set_arm_tumbler(int p_h, int p_side, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_limit) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_side, EnemyRig::ARMS);
+	EnemyTumbler &t = reps[p_h].arms.tumb[p_side];
+	t.inertia = p_inertia;
+	t.frequency = p_frequency;
+	t.damping = p_damping;
+	t.fall_angle = p_limit;
+}
+
+void EnemyReplicas::replica_arm_push(int p_h, int p_side, const Vector3 &p_r, const Vector3 &p_j) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_side, EnemyRig::ARMS);
+	reps[p_h].arms.tumb[p_side].push(p_r, p_j);
+}
+
+Transform3D EnemyReplicas::replica_arm_base(int p_h, int p_side) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Transform3D());
+	ERR_FAIL_INDEX_V(p_side, EnemyRig::ARMS, Transform3D());
+	return reps[p_h].arms.base[p_side];
+}
+
+Vector3 EnemyReplicas::replica_arm_spin(int p_h, int p_side) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	ERR_FAIL_INDEX_V(p_side, EnemyRig::ARMS, Vector3());
+	return reps[p_h].arms.tumb[p_side].spin;
+}
+
+Vector3 EnemyReplicas::replica_arm_tilt(int p_h, int p_side) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	ERR_FAIL_INDEX_V(p_side, EnemyRig::ARMS, Vector3());
+	return reps[p_h].arms.tumb[p_side].tilt;
+}
+
 int EnemyReplicas::replica_tumble_state(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), EnemyTumbler::STAND);
 	return reps[p_h].tumb.state;
@@ -373,6 +441,14 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("replica_tumble_spin", "handle"), &EnemyReplicas::replica_tumble_spin);
 	ClassDB::bind_method(D_METHOD("replica_tilt", "handle"), &EnemyReplicas::replica_tilt);
 	ClassDB::bind_method(D_METHOD("replica_tumble_state", "handle"), &EnemyReplicas::replica_tumble_state);
+	ClassDB::bind_method(D_METHOD("replica_set_rig", "handle", "rig", "arm_l", "arm_r"), &EnemyReplicas::replica_set_rig);
+	ClassDB::bind_method(D_METHOD("replica_play", "handle", "clip"), &EnemyReplicas::replica_play);
+	ClassDB::bind_method(D_METHOD("replica_acting", "handle"), &EnemyReplicas::replica_acting);
+	ClassDB::bind_method(D_METHOD("replica_set_arm_tumbler", "handle", "side", "inertia", "frequency", "damping", "limit"), &EnemyReplicas::replica_set_arm_tumbler);
+	ClassDB::bind_method(D_METHOD("replica_arm_push", "handle", "side", "r", "j"), &EnemyReplicas::replica_arm_push);
+	ClassDB::bind_method(D_METHOD("replica_arm_base", "handle", "side"), &EnemyReplicas::replica_arm_base);
+	ClassDB::bind_method(D_METHOD("replica_arm_spin", "handle", "side"), &EnemyReplicas::replica_arm_spin);
+	ClassDB::bind_method(D_METHOD("replica_arm_tilt", "handle", "side"), &EnemyReplicas::replica_arm_tilt);
 	ClassDB::bind_method(D_METHOD("get_due_clips"), &EnemyReplicas::get_due_clips);
 	ClassDB::bind_method(D_METHOD("get_replica_count"), &EnemyReplicas::get_replica_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyReplicas::get_last_tick_usec);

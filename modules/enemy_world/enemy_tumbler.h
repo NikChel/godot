@@ -14,6 +14,8 @@
 //   FALLING — тяжесть (стержень высоты height); лёг на пол — DOWN; отброшен назад ниже fall_angle — STAND;
 //   DOWN    — тяжесть, лежит; пролежал down_time — RISING;
 //   RISING  — подъём к вертикали без перелёта против тяжести; сбит до пола — DOWN; почти вертикально — STAND.
+// Без падения (can_fall = false, рука ходока — spec 2026-10-27-walker-arms-design): всегда STAND, fall_angle — предел
+// наклона (ход наружу на пределе гасится).
 // Плюс оглушение врага (staggered) и хит-тело: поза основание × наклон — в узел и сразу в PhysicsServer (видна
 // запросам того же тика). Общая для тел хоста (EnemyBodies) и копий клиента (EnemyReplicas).
 struct EnemyTumbler {
@@ -43,6 +45,7 @@ struct EnemyTumbler {
 	real_t rise_time = 1.0f; // Встаёт, с
 	real_t stagger_angle = 0.17453293f; // 10°: оглушён, пока наклон больше (или не STAND)
 	real_t knockback = 0.15f; // Отброс: Δv основания = горизонталь импульса × это, м/с на Н·с
+	bool can_fall = true; // Нет — не падает, fall_angle — предел наклона
 
 	// Состояние
 	uint8_t state = STAND;
@@ -66,4 +69,5 @@ private:
 	real_t _gravity(real_t p_a) const;
 	bool _floor(real_t p_dt);
 	void _lie();
+	void _limit();
 };

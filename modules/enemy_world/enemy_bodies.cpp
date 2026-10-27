@@ -344,6 +344,76 @@ int EnemyBodies::body_tumble_state(int p_h) const {
 	return bodies[p_h].tumb.state;
 }
 
+void EnemyBodies::body_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_COND(p_rig.is_null() || !p_rig->is_built());
+	Body &b = bodies[p_h];
+	b.rig = p_rig;
+	b.anim = EnemyAnim();
+	b.arms.setup(0, p_arm_l, **p_rig);
+	b.arms.setup(1, p_arm_r, **p_rig);
+}
+
+void EnemyBodies::body_play(int p_h, const StringName &p_clip) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Body &b = bodies[p_h];
+	ERR_FAIL_COND(b.rig.is_null());
+	const int c = b.rig->clip_find(p_clip);
+	ERR_FAIL_COND_MSG(c < 0, vformat("EnemyBodies: no clip %s.", p_clip));
+	b.anim.play(c, EnemyAnim::ACTION_BLEND, true);
+}
+
+bool EnemyBodies::body_acting(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	return bodies[p_h].anim.acting;
+}
+
+int EnemyBodies::body_anim_clip(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), -1);
+	return bodies[p_h].anim.clip;
+}
+
+real_t EnemyBodies::body_anim_rate(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), 0.0f);
+	return bodies[p_h].anim.rate;
+}
+
+void EnemyBodies::body_set_arm_tumbler(int p_h, int p_side, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_limit) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_side, EnemyRig::ARMS);
+	EnemyTumbler &t = bodies[p_h].arms.tumb[p_side];
+	t.inertia = p_inertia;
+	t.frequency = p_frequency;
+	t.damping = p_damping;
+	t.fall_angle = p_limit;
+}
+
+void EnemyBodies::body_arm_push(int p_h, int p_side, const Vector3 &p_r, const Vector3 &p_j) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_side, EnemyRig::ARMS);
+	if (!bodies[p_h].dead) {
+		bodies[p_h].arms.tumb[p_side].push(p_r, p_j);
+	}
+}
+
+Transform3D EnemyBodies::body_arm_base(int p_h, int p_side) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Transform3D());
+	ERR_FAIL_INDEX_V(p_side, EnemyRig::ARMS, Transform3D());
+	return bodies[p_h].arms.base[p_side];
+}
+
+Vector3 EnemyBodies::body_arm_spin(int p_h, int p_side) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	ERR_FAIL_INDEX_V(p_side, EnemyRig::ARMS, Vector3());
+	return bodies[p_h].arms.tumb[p_side].spin;
+}
+
+Vector3 EnemyBodies::body_arm_tilt(int p_h, int p_side) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	ERR_FAIL_INDEX_V(p_side, EnemyRig::ARMS, Vector3());
+	return bodies[p_h].arms.tumb[p_side].tilt;
+}
+
 int EnemyBodies::body_brain(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), BRAIN_IDLE);
 	return bodies[p_h].brain;
@@ -453,6 +523,9 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 		}
 		_tick_body((int)h, b, body, now, p_delta);
 		b.tumb.place(_tumble_base(b, body)); // Поза тела этого тика — окончательная
+		if (b.rig.is_valid()) {
+			b.arms.place(**b.rig, b.anim, _avatar_xf(b, body));
+		}
 	}
 	last_tick_usec = OS::get_singleton()->get_ticks_usec() - t0;
 	return events;
@@ -464,6 +537,10 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	if (r_b.tumb.step(p_dt)) {
 		r_b.tumb.log_state();
 	}
+	if (r_b.rig.is_valid()) {
+		r_b.anim.step(**r_b.rig, p_dt, r_b.view_speed); // Скорость вдоль торса прошлого тика
+	}
+	r_b.arms.step(p_dt);
 	if (r_b.link_state == LINK_ON || r_b.link_state == LINK_LAND) {
 		_link_move(p_h, r_b, p_body, fx, p_now, p_dt);
 		return;
@@ -545,7 +622,8 @@ void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D
 	r_b.net_tick = (int64_t)p_now;
 	r_b.net_pos = p_fx.affine_inverse().xform(pos);
 	if (views.is_valid() && r_b.view >= 0) { // Визуалу — в системе пространства (кадр ставит позой кадра системы)
-		views->view_commit(r_b.view, Transform3D(r_b.tumb.basis() * Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.view_speed, r_b.space);
+		views->view_commit(r_b.view, Transform3D(r_b.tumb.basis() * Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.space);
+		_view_anim(r_b);
 	}
 	tier_counts[r_b.tier]++;
 }
@@ -576,6 +654,17 @@ Transform3D EnemyBodies::_carry(Body &r_b, CharacterBody3D *p_body) {
 // Основание неваляшки (мир): базис системы тела в точке тела — у хоста и копий одно.
 Transform3D EnemyBodies::_tumble_base(const Body &p_b, CharacterBody3D *p_body) const {
 	return Transform3D(_frame_xform(p_b).basis, p_body->get_global_position());
+}
+
+// Поза корня аватара этого тика (мир) — как её покажет кадр при доле 1: система × наклон × взгляд, минус подъём шага.
+Transform3D EnemyBodies::_avatar_xf(const Body &p_b, CharacterBody3D *p_body) const {
+	const Basis basis = _frame_xform(p_b).basis * p_b.tumb.basis() * Basis(UP_AXIS, p_b.yaw);
+	return Transform3D(basis, p_body->get_global_position() - basis.get_column(1).normalized() * p_b.lag_curr);
+}
+
+void EnemyBodies::_view_anim(const Body &p_b) {
+	const Quaternion tilt[EnemyRig::ARMS] = { p_b.arms.tilt(0), p_b.arms.tilt(1) };
+	views->view_anim(p_b.view, p_b.anim, tilt);
 }
 
 // Взгляд (мир, по верху тела): −Z торса.
@@ -1012,6 +1101,16 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_set_tumbler", "handle", "hit_body", "inertia", "frequency", "damping", "fall_angle", "down_angle", "height", "down_time", "rise_time", "stagger_angle", "knockback"), &EnemyBodies::body_set_tumbler);
 	ClassDB::bind_method(D_METHOD("body_push", "handle", "arm", "impulse"), &EnemyBodies::body_push);
 	ClassDB::bind_method(D_METHOD("body_tumble_base", "handle"), &EnemyBodies::body_tumble_base);
+	ClassDB::bind_method(D_METHOD("body_set_rig", "handle", "rig", "arm_l", "arm_r"), &EnemyBodies::body_set_rig);
+	ClassDB::bind_method(D_METHOD("body_play", "handle", "clip"), &EnemyBodies::body_play);
+	ClassDB::bind_method(D_METHOD("body_acting", "handle"), &EnemyBodies::body_acting);
+	ClassDB::bind_method(D_METHOD("body_anim_clip", "handle"), &EnemyBodies::body_anim_clip);
+	ClassDB::bind_method(D_METHOD("body_anim_rate", "handle"), &EnemyBodies::body_anim_rate);
+	ClassDB::bind_method(D_METHOD("body_set_arm_tumbler", "handle", "side", "inertia", "frequency", "damping", "limit"), &EnemyBodies::body_set_arm_tumbler);
+	ClassDB::bind_method(D_METHOD("body_arm_push", "handle", "side", "r", "j"), &EnemyBodies::body_arm_push);
+	ClassDB::bind_method(D_METHOD("body_arm_base", "handle", "side"), &EnemyBodies::body_arm_base);
+	ClassDB::bind_method(D_METHOD("body_arm_spin", "handle", "side"), &EnemyBodies::body_arm_spin);
+	ClassDB::bind_method(D_METHOD("body_arm_tilt", "handle", "side"), &EnemyBodies::body_arm_tilt);
 	ClassDB::bind_method(D_METHOD("body_tumble_spin", "handle"), &EnemyBodies::body_tumble_spin);
 	ClassDB::bind_method(D_METHOD("body_tilt", "handle"), &EnemyBodies::body_tilt);
 	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);

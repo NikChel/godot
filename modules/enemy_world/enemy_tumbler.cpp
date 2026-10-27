@@ -56,7 +56,11 @@ bool EnemyTumbler::step(real_t p_dt) {
 	switch (state) {
 		case STAND: {
 			if (a > fall_angle) {
-				state = FALLING;
+				if (can_fall) {
+					state = FALLING;
+				} else {
+					_limit();
+				}
 			}
 		} break;
 		case FALLING: {
@@ -129,6 +133,17 @@ bool EnemyTumbler::_floor(real_t p_dt) {
 	const Vector3 along = spin - axis * radial;
 	spin = along * Math::exp(-FLOOR_FRICTION * p_dt) + axis * MIN(radial, 0.0f);
 	return true;
+}
+
+// Предел без падения: наклон не больше fall_angle, ход наружу гасится.
+void EnemyTumbler::_limit() {
+	const real_t a = tilt.length();
+	const Vector3 axis = tilt / a;
+	tilt = axis * fall_angle;
+	const real_t radial = spin.dot(axis);
+	if (radial > 0.0f) {
+		spin -= axis * radial;
+	}
 }
 
 void EnemyTumbler::_lie() {

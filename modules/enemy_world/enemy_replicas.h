@@ -1,5 +1,8 @@
 #pragma once
 
+#include "enemy_anim.h"
+#include "enemy_arms.h"
+#include "enemy_rig.h"
 #include "enemy_tumbler.h"
 #include "enemy_views.h"
 
@@ -25,6 +28,8 @@ class Node3D;
 // снимка — по net id (feed_snapshot), один вызов на пакет. Тела — Node3D (ObjectID; нет тела — только буфер).
 // Неваляшка (spec 2026-10-26-walker-tumbler-design): наклон каждый пир считает сам по толчкам (replica_push; отброс —
 // снимками хоста); шаг — в тике копий, визуал — с наклоном, хит-тело — основание × наклон.
+// Анимация и руки (spec 2026-10-27-walker-arms-design): как у тел хоста (EnemyBodies) — часы анимации по скорости
+// снимка, разовый клип — replica_play (GDScript по событию хоста), качание рук каждый пир считает сам.
 class EnemyReplicas : public RefCounted {
 	GDCLASS(EnemyReplicas, RefCounted);
 
@@ -56,6 +61,9 @@ private:
 		real_t speed = 0.0f;
 		real_t step_lag = 0.0f;
 		EnemyTumbler tumb;
+		Ref<EnemyRig> rig;
+		EnemyAnim anim;
+		EnemyArms arms;
 	};
 
 	struct Space {
@@ -111,6 +119,15 @@ public:
 	Vector3 replica_tumble_spin(int p_h) const;
 	Vector3 replica_tilt(int p_h) const;
 	int replica_tumble_state(int p_h) const;
+	// Анимация и руки (как EnemyBodies.body_set_rig / body_play / body_arm_*)
+	void replica_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r);
+	void replica_play(int p_h, const StringName &p_clip);
+	bool replica_acting(int p_h) const;
+	void replica_set_arm_tumbler(int p_h, int p_side, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_limit);
+	void replica_arm_push(int p_h, int p_side, const Vector3 &p_r, const Vector3 &p_j);
+	Transform3D replica_arm_base(int p_h, int p_side) const;
+	Vector3 replica_arm_spin(int p_h, int p_side) const;
+	Vector3 replica_arm_tilt(int p_h, int p_side) const;
 	// Тик копий: ручки копий с наступившими событиями (клипы — get_due_clips, по порядку)
 	PackedInt32Array tick(double p_seek);
 	Array get_due_clips() const { return due_clips; }

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "enemy_anim.h"
+#include "enemy_arms.h"
 #include "enemy_links.h"
+#include "enemy_rig.h"
 #include "enemy_tumbler.h"
 #include "enemy_views.h"
 #include "enemy_world.h"
@@ -38,6 +41,9 @@ class Node3D;
 // Неваляшка (spec 2026-10-26-walker-tumbler-design): толчок (body_push) — наклон (EnemyTumbler) и отброс скорости тела
 // (только здесь, у хоста); шаг наклона — в начале тика тела; оглушён — мозг STAGGER (до точки пробы); визуал — поза с
 // наклоном, хит-тело — основание (базис системы в точке тела) × наклон в конце тика тела.
+// Анимация и руки (spec 2026-10-27-walker-arms-design): часы анимации (EnemyAnim) — шаг в начале тика тела по скорости
+// вдоль торса прошлого тика, разовый клип — body_play (замах, прыжок; GDScript по событию); визуалу — с позой; руки
+// (EnemyArms: неваляшки на плечах, хит-тела по кадрам костей EnemyRig) — шаг в начале тика, поза в конце.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -180,6 +186,10 @@ private:
 		LocalVector<uint8_t> link_log; // Виды пройденных связей (пробы)
 		// Неваляшка
 		EnemyTumbler tumb;
+		// Анимация и руки
+		Ref<EnemyRig> rig;
+		EnemyAnim anim;
+		EnemyArms arms;
 	};
 
 	LocalVector<Body> bodies;
@@ -223,6 +233,8 @@ private:
 	Transform3D _carry(Body &r_b, CharacterBody3D *p_body);
 	static Vector3 _forward(const Body &p_b, const Transform3D &p_fx);
 	Transform3D _tumble_base(const Body &p_b, CharacterBody3D *p_body) const;
+	Transform3D _avatar_xf(const Body &p_b, CharacterBody3D *p_body) const;
+	void _view_anim(const Body &p_b);
 	// Мозг
 	int _player_index(ObjectID p_id) const;
 	bool _player_alive(int p_i) const;
@@ -302,6 +314,19 @@ public:
 	Vector3 body_tumble_spin(int p_h) const;
 	Vector3 body_tilt(int p_h) const;
 	int body_tumble_state(int p_h) const;
+	// Анимация и руки: риг модели и хит-тела рук (левая, правая); разовый клип («библиотека/клип» рига); идёт ли он, клип
+	// и темп (пробы); неваляшка руки (сторона 0 — левая): настройки (предел — рад), толчок (кадр основания), основание
+	// (мир: кадр кости плеча), угловая скорость, наклон
+	void body_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r);
+	void body_play(int p_h, const StringName &p_clip);
+	bool body_acting(int p_h) const;
+	int body_anim_clip(int p_h) const;
+	real_t body_anim_rate(int p_h) const;
+	void body_set_arm_tumbler(int p_h, int p_side, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_limit);
+	void body_arm_push(int p_h, int p_side, const Vector3 &p_r, const Vector3 &p_j);
+	Transform3D body_arm_base(int p_h, int p_side) const;
+	Vector3 body_arm_spin(int p_h, int p_side) const;
+	Vector3 body_arm_tilt(int p_h, int p_side) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);
