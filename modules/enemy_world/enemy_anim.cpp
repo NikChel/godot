@@ -37,6 +37,11 @@ void EnemyAnim::step(const EnemyRig &p_rig, real_t p_dt, real_t p_speed) {
 	if (from >= 0) {
 		from_time = p_rig.clip_wrap(from, from_time);
 	}
+	if (pending >= 0) {
+		play(pending, ACTION_BLEND, true);
+		pending = -1;
+		return;
+	}
 	if (acting) {
 		if (time < p_rig.clip_length(clip)) {
 			return;

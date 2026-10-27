@@ -360,12 +360,12 @@ void EnemyBodies::body_play(int p_h, const StringName &p_clip) {
 	ERR_FAIL_COND(b.rig.is_null());
 	const int c = b.rig->clip_find(p_clip);
 	ERR_FAIL_COND_MSG(c < 0, vformat("EnemyBodies: no clip %s.", p_clip));
-	b.anim.play(c, EnemyAnim::ACTION_BLEND, true);
+	b.anim.request(c);
 }
 
 bool EnemyBodies::body_acting(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), false);
-	return bodies[p_h].anim.acting;
+	return bodies[p_h].anim.busy();
 }
 
 int EnemyBodies::body_anim_clip(int p_h) const {

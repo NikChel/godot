@@ -364,12 +364,12 @@ void EnemyReplicas::replica_play(int p_h, const StringName &p_clip) {
 	ERR_FAIL_COND(r.rig.is_null());
 	const int c = r.rig->clip_find(p_clip);
 	ERR_FAIL_COND_MSG(c < 0, vformat("EnemyReplicas: no clip %s.", p_clip));
-	r.anim.play(c, EnemyAnim::ACTION_BLEND, true);
+	r.anim.request(c);
 }
 
 bool EnemyReplicas::replica_acting(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), false);
-	return reps[p_h].anim.acting;
+	return reps[p_h].anim.busy();
 }
 
 void EnemyReplicas::replica_set_arm_tumbler(int p_h, int p_side, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_limit) {

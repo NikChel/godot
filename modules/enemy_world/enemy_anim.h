@@ -7,8 +7,9 @@ class EnemyRig;
 // Часы анимации врага (spec docs/superpowers/specs/2026-10-27-walker-arms-design.md §2): клип, время и смешивание —
 // состояние физ-тика (его читает физика — хит-формы рук, EnemyArms; кадр показывает его — EnemyViews; AGENTS §2.2).
 // Правила — бывшие EnemyViews (этап 3): стойка / шаг по скорости вдоль торса (гистерезис WALK_ON / WALK_OFF, темп
-// шага — как AvatarAnimator игрока), разовый клип (play) — до конца со скоростью 1, затем снова по скорости; смена —
-// смешивание с прошлым клипом (он идёт дальше, его вес линейно падает до нуля). Клипы — номера EnemyRig: 0 —
+// шага — как AvatarAnimator игрока), разовый клип (request — заказ вне тика, включает шаг) — до конца со скоростью 1,
+// затем снова по скорости; смена — смешивание с прошлым клипом (он идёт дальше, его вес линейно падает до нуля). Смена
+// — только в шаге, после хода времени, с весом 0: кадр (прошлый тик + доля) непрерывен и при доле 1 равен тику. Клипы — номера EnemyRig: 0 —
 // стойка, 1 — шаг, дальше разовые. Общая для тел хоста (EnemyBodies) и копий клиента (EnemyReplicas).
 struct EnemyAnim {
 	static constexpr int CLIP_STAND = 0;
@@ -32,7 +33,10 @@ struct EnemyAnim {
 	real_t blend = 0.0f; // Прошло смешивания, с
 	real_t blend_len = 0.0f;
 	bool acting = false; // Идёт разовый клип
+	int pending = -1; // Заказанный разовый клип (включит следующий шаг)
 
+	void request(int p_clip) { pending = p_clip; }
+	bool busy() const { return acting || pending >= 0; } // Разовый клип идёт или заказан
 	void play(int p_clip, real_t p_blend, bool p_action);
 	void step(const EnemyRig &p_rig, real_t p_dt, real_t p_speed); // Тик: время и правила
 	EnemyAnim advanced(real_t p_dt) const; // Время вперёд без правил (кадр — доля тика; чистая функция)
