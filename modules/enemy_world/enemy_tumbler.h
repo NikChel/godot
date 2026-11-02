@@ -33,6 +33,8 @@ struct EnemyTumbler {
 	static constexpr real_t FLOOR_FRICTION = 4.0f; // Затухание хода вдоль пола, 1/с
 	static constexpr real_t RISE_SETTLE = 4.7f; // Критическое затухание: до 5% за rise_time
 	static constexpr real_t YAW_MIN_SIN2 = 0.25f; // sin²(30°): ниже — кручение почти не поворачивает наклон
+	static constexpr real_t REST_TILT = 1e-3f; // Покой (сон хит-форм, EnemyWake): стоит, наклон и угловая скорость меньше, рад
+	static constexpr real_t REST_SPIN = 1e-2f; // рад/с
 
 	// Настройки (WalkerTumble)
 	real_t inertia = 2.0f; // Момент инерции относительно опоры, кг·м²
@@ -59,6 +61,7 @@ struct EnemyTumbler {
 	Basis basis() const;
 	Vector3 point_velocity(const Vector3 &p_r) const { return spin.cross(p_r); }
 	bool staggered() const { return state != STAND || tilt.length() > stagger_angle; }
+	bool resting() const { return state == STAND && tilt.length_squared() < REST_TILT * REST_TILT && spin.length_squared() < REST_SPIN * REST_SPIN; }
 	void place(const Transform3D &p_base) const; // Хит-тело в позу p_base × наклон (мир)
 	void log_state() const; // Строка лога смены состояния (имя врага — родитель хит-тела)
 

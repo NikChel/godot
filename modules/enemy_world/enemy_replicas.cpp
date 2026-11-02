@@ -285,7 +285,9 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			const Quaternion tilt[EnemyRig::ARMS] = { r.arms.tilt(0), r.arms.tilt(1) };
 			views->view_anim(r.view, r.anim, tilt);
 		}
-		if (body != nullptr) {
+		const ObjectID ids[3] = { r.tumb.hit_id, r.arms.tumb[0].hit_id, r.arms.tumb[1].hit_id };
+		const bool seen = body != nullptr && EnemyWake::interest(body->get_global_position() + xf.basis.get_column(1).normalized() * EnemyWake::CENTER_H, wake_points);
+		if (r.wake.update(seen, !r.tumb.resting() || !r.arms.resting(), dt, ids, 3) && body != nullptr) {
 			r.tumb.place(_tumble_base(r, body));
 			if (r.rig.is_valid()) { // Корень аватара — как его покажет кадр при доле 1
 				const Basis b = xf.basis * r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
@@ -406,6 +408,11 @@ Vector3 EnemyReplicas::replica_arm_tilt(int p_h, int p_side) const {
 	return reps[p_h].arms.tumb[p_side].tilt;
 }
 
+int EnemyReplicas::replica_wake_state(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), EnemyWake::SLEEP);
+	return reps[p_h].wake.state;
+}
+
 int EnemyReplicas::replica_tumble_state(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), EnemyTumbler::STAND);
 	return reps[p_h].tumb.state;
@@ -449,6 +456,8 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("replica_arm_base", "handle", "side"), &EnemyReplicas::replica_arm_base);
 	ClassDB::bind_method(D_METHOD("replica_arm_spin", "handle", "side"), &EnemyReplicas::replica_arm_spin);
 	ClassDB::bind_method(D_METHOD("replica_arm_tilt", "handle", "side"), &EnemyReplicas::replica_arm_tilt);
+	ClassDB::bind_method(D_METHOD("set_wake_points", "points"), &EnemyReplicas::set_wake_points);
+	ClassDB::bind_method(D_METHOD("replica_wake_state", "handle"), &EnemyReplicas::replica_wake_state);
 	ClassDB::bind_method(D_METHOD("get_due_clips"), &EnemyReplicas::get_due_clips);
 	ClassDB::bind_method(D_METHOD("get_replica_count"), &EnemyReplicas::get_replica_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyReplicas::get_last_tick_usec);

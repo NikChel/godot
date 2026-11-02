@@ -6,6 +6,7 @@
 #include "enemy_rig.h"
 #include "enemy_tumbler.h"
 #include "enemy_views.h"
+#include "enemy_wake.h"
 #include "enemy_world.h"
 
 #include "core/math/transform_3d.h"
@@ -45,6 +46,8 @@ class Node3D;
 // вдоль торса прошлого тика, разовый клип — body_play (замах, прыжок; GDScript по событию; включит следующий шаг);
 // визуалу — с позой; руки
 // (EnemyArms: неваляшки на плечах, хит-тела по кадрам костей EnemyRig) — шаг в начале тика, поза в конце.
+// Сон хит-форм (EnemyWake, spec §5): поза хит-тел торса и рук — только у бодрствующих (точка интереса set_wake_points
+// рядом или неваляшка не в покое), у спящих формы выключены.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -191,6 +194,7 @@ private:
 		Ref<EnemyRig> rig;
 		EnemyAnim anim;
 		EnemyArms arms;
+		EnemyWake wake;
 	};
 
 	LocalVector<Body> bodies;
@@ -206,6 +210,7 @@ private:
 	PackedByteArray players_alive;
 	LocalVector<ObjectID> players_id;
 	PackedInt32Array events;
+	PackedVector4Array wake_points; // Точки интереса тика (сон хит-форм): центр (мир) и радиус
 	uint64_t last_tick_usec = 0;
 	int tier_counts[2] = {};
 	int rest_count = 0;
@@ -236,6 +241,7 @@ private:
 	Transform3D _tumble_base(const Body &p_b, CharacterBody3D *p_body) const;
 	Transform3D _avatar_xf(const Body &p_b, CharacterBody3D *p_body) const;
 	void _view_anim(const Body &p_b);
+	bool _wake(Body &r_b, CharacterBody3D *p_body, real_t p_dt);
 	// Мозг
 	int _player_index(ObjectID p_id) const;
 	bool _player_alive(int p_i) const;
@@ -328,6 +334,9 @@ public:
 	Transform3D body_arm_base(int p_h, int p_side) const;
 	Vector3 body_arm_spin(int p_h, int p_side) const;
 	Vector3 body_arm_tilt(int p_h, int p_side) const;
+	// Сон хит-форм: точки интереса тика (xyz — центр, мир; w — радиус) и состояние тела (EnemyWake::State, пробы)
+	void set_wake_points(const PackedVector4Array &p_points) { wake_points = p_points; }
+	int body_wake_state(int p_h) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);

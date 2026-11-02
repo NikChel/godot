@@ -414,6 +414,11 @@ Vector3 EnemyBodies::body_arm_tilt(int p_h, int p_side) const {
 	return bodies[p_h].arms.tumb[p_side].tilt;
 }
 
+int EnemyBodies::body_wake_state(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), EnemyWake::SLEEP);
+	return bodies[p_h].wake.state;
+}
+
 int EnemyBodies::body_brain(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), BRAIN_IDLE);
 	return bodies[p_h].brain;
@@ -522,9 +527,11 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 			continue;
 		}
 		_tick_body((int)h, b, body, now, p_delta);
-		b.tumb.place(_tumble_base(b, body)); // Поза тела этого тика — окончательная
-		if (b.rig.is_valid()) {
-			b.arms.place(**b.rig, b.anim, _avatar_xf(b, body));
+		if (_wake(b, body, p_delta)) { // Поза тела этого тика — окончательная
+			b.tumb.place(_tumble_base(b, body));
+			if (b.rig.is_valid()) {
+				b.arms.place(**b.rig, b.anim, _avatar_xf(b, body));
+			}
 		}
 	}
 	last_tick_usec = OS::get_singleton()->get_ticks_usec() - t0;
@@ -660,6 +667,14 @@ Transform3D EnemyBodies::_tumble_base(const Body &p_b, CharacterBody3D *p_body) 
 Transform3D EnemyBodies::_avatar_xf(const Body &p_b, CharacterBody3D *p_body) const {
 	const Basis basis = _frame_xform(p_b).basis * p_b.tumb.basis() * Basis(UP_AXIS, p_b.yaw);
 	return Transform3D(basis, p_body->get_global_position() - basis.get_column(1).normalized() * p_b.lag_curr);
+}
+
+// Сон хит-форм: точка интереса у точки тела (над ногами по верху) или неваляшка тела / рук не в покое. true — хит-тела
+// ставятся в позу.
+bool EnemyBodies::_wake(Body &r_b, CharacterBody3D *p_body, real_t p_dt) {
+	const Vector3 at = p_body->get_global_position() + r_b.up * EnemyWake::CENTER_H;
+	const ObjectID ids[3] = { r_b.tumb.hit_id, r_b.arms.tumb[0].hit_id, r_b.arms.tumb[1].hit_id };
+	return r_b.wake.update(EnemyWake::interest(at, wake_points), !r_b.tumb.resting() || !r_b.arms.resting(), p_dt, ids, 3);
 }
 
 void EnemyBodies::_view_anim(const Body &p_b) {
@@ -1111,6 +1126,8 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_arm_base", "handle", "side"), &EnemyBodies::body_arm_base);
 	ClassDB::bind_method(D_METHOD("body_arm_spin", "handle", "side"), &EnemyBodies::body_arm_spin);
 	ClassDB::bind_method(D_METHOD("body_arm_tilt", "handle", "side"), &EnemyBodies::body_arm_tilt);
+	ClassDB::bind_method(D_METHOD("set_wake_points", "points"), &EnemyBodies::set_wake_points);
+	ClassDB::bind_method(D_METHOD("body_wake_state", "handle"), &EnemyBodies::body_wake_state);
 	ClassDB::bind_method(D_METHOD("body_tumble_spin", "handle"), &EnemyBodies::body_tumble_spin);
 	ClassDB::bind_method(D_METHOD("body_tilt", "handle"), &EnemyBodies::body_tilt);
 	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);

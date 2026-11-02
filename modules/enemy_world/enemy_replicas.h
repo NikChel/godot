@@ -5,6 +5,7 @@
 #include "enemy_rig.h"
 #include "enemy_tumbler.h"
 #include "enemy_views.h"
+#include "enemy_wake.h"
 
 #include "core/math/transform_3d.h"
 #include "core/math/vector3.h"
@@ -29,7 +30,8 @@ class Node3D;
 // Неваляшка (spec 2026-10-26-walker-tumbler-design): наклон каждый пир считает сам по толчкам (replica_push; отброс —
 // снимками хоста); шаг — в тике копий, визуал — с наклоном, хит-тело — основание × наклон.
 // Анимация и руки (spec 2026-10-27-walker-arms-design): как у тел хоста (EnemyBodies) — часы анимации по скорости
-// снимка, разовый клип — replica_play (GDScript по событию хоста), качание рук каждый пир считает сам.
+// снимка, разовый клип — replica_play (GDScript по событию хоста), качание рук каждый пир считает сам. Сон хит-форм
+// (EnemyWake) — как у тел хоста, по своим точкам интереса.
 class EnemyReplicas : public RefCounted {
 	GDCLASS(EnemyReplicas, RefCounted);
 
@@ -64,6 +66,7 @@ private:
 		Ref<EnemyRig> rig;
 		EnemyAnim anim;
 		EnemyArms arms;
+		EnemyWake wake;
 	};
 
 	struct Space {
@@ -79,6 +82,7 @@ private:
 	Ref<EnemyViews> views;
 	PackedInt32Array due_handles;
 	Array due_clips;
+	PackedVector4Array wake_points; // Точки интереса тика (сон хит-форм): центр (мир) и радиус
 	uint64_t last_tick_usec = 0;
 
 	bool _valid(int p_h) const;
@@ -128,6 +132,9 @@ public:
 	Transform3D replica_arm_base(int p_h, int p_side) const;
 	Vector3 replica_arm_spin(int p_h, int p_side) const;
 	Vector3 replica_arm_tilt(int p_h, int p_side) const;
+	// Сон хит-форм (как EnemyBodies.set_wake_points / body_wake_state)
+	void set_wake_points(const PackedVector4Array &p_points) { wake_points = p_points; }
+	int replica_wake_state(int p_h) const;
 	// Тик копий: ручки копий с наступившими событиями (клипы — get_due_clips, по порядку)
 	PackedInt32Array tick(double p_seek);
 	Array get_due_clips() const { return due_clips; }

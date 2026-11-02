@@ -26,4 +26,5 @@ struct EnemyArms {
 	// Основания по анимации и поза тел; p_avatar — поза корня аватара этого тика (мир)
 	void place(const EnemyRig &p_rig, const EnemyAnim &p_anim, const Transform3D &p_avatar);
 	Quaternion tilt(int p_side) const; // Наклон (кадр кости плеча) — визуалу
+	bool resting() const { return tumb[0].resting() && tumb[1].resting(); }
 };
