@@ -18,20 +18,29 @@ void ProjectileViews::setup(RID p_scenario) {
 	scenario = p_scenario;
 }
 
-int ProjectileViews::type_add(RID p_mesh) {
+int ProjectileViews::type_add(RID p_mesh, real_t p_scale, const Color &p_tint) {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	Type t;
 	t.multimesh = rs->multimesh_create();
 	rs->multimesh_set_mesh(t.multimesh, p_mesh);
 	t.instance = rs->instance_create2(t.multimesh, scenario);
 	rs->instance_geometry_set_cast_shadows_setting(t.instance, RSE::SHADOW_CASTING_SETTING_OFF);
+	rs->instance_geometry_set_shader_parameter(t.instance, "tint", p_tint);
+	t.scale = p_scale;
 	types.push_back(t);
 	return (int)types.size() - 1;
 }
 
 void ProjectileViews::set_lag_inputs(const PackedVector3Array &p_points, const PackedFloat64Array &p_lags, int p_local) {
-	lag_points = p_points;
-	lags = p_lags;
+	// Своя копия: вызывающий переписывает свои массивы каждый кадр (общий буфер копировался бы при каждой его записи).
+	lag_points.resize((uint32_t)p_points.size());
+	for (int i = 0; i < p_points.size(); i++) {
+		lag_points[i] = p_points[i];
+	}
+	lags.resize((uint32_t)p_lags.size());
+	for (int i = 0; i < p_lags.size(); i++) {
+		lags[i] = p_lags[i];
+	}
 	lag_local = p_local;
 }
 
@@ -47,8 +56,8 @@ double ProjectileViews::_gap(int p_player, const Vector3 &p_at) const {
 // Задержка показа точки, с — ItemViewTime.lag_at: у своих ног 0, у чужих — время его аватара, по дороге —
 // пропорционально расстояниям до зон касания.
 double ProjectileViews::lag_at(const Vector3 &p_at) const {
-	const int n = lags.size();
-	if (lag_local < 0 || lag_local >= n || lag_points.size() < n * 4) {
+	const int n = (int)lags.size();
+	if (lag_local < 0 || lag_local >= n || (int)lag_points.size() < n * 4) {
 		return 0.0;
 	}
 	const double g_me = _gap(lag_local, p_at);
@@ -75,22 +84,23 @@ void ProjectileViews::_put(int p_type, const Vector3 &p_at, real_t p_scale) {
 		return;
 	}
 	Type &t = types[p_type];
+	const real_t s = p_scale * t.scale;
 	if ((t.count + 1) * STRIDE > t.buf.size()) {
 		// Хвост — нули: Vector::resize не заполняет float, а AABB MultiMesh считается по всему буферу.
 		t.buf.resize_initialized(MAX(16, t.buf.size() / STRIDE * 2) * STRIDE);
 	}
 	float *w = t.buf.ptrw() + t.count * STRIDE;
-	w[0] = p_scale;
+	w[0] = s;
 	w[1] = 0.0f;
 	w[2] = 0.0f;
 	w[3] = p_at.x;
 	w[4] = 0.0f;
-	w[5] = p_scale;
+	w[5] = s;
 	w[6] = 0.0f;
 	w[7] = p_at.y;
 	w[8] = 0.0f;
 	w[9] = 0.0f;
-	w[10] = p_scale;
+	w[10] = s;
 	w[11] = p_at.z;
 	t.count++;
 }
@@ -143,6 +153,7 @@ void ProjectileViews::frame(const Ref<ProjectileSwarm> &p_swarm, int64_t p_frame
 					fl.at = s.hit_point;
 					fl.left = FLASH_S;
 					flashes.push_back(fl);
+					impacts.push_back(s.key);
 				}
 				continue;
 			}
@@ -159,6 +170,12 @@ void ProjectileViews::frame(const Ref<ProjectileSwarm> &p_swarm, int64_t p_frame
 	}
 }
 
+PackedInt64Array ProjectileViews::take_impacts() {
+	PackedInt64Array out = impacts;
+	impacts.clear();
+	return out;
+}
+
 int ProjectileViews::visible_count() const {
 	int n = 0;
 	for (const Type &t : types) {
@@ -169,7 +186,9 @@ int ProjectileViews::visible_count() const {
 
 void ProjectileViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("setup", "scenario"), &ProjectileViews::setup);
-	ClassDB::bind_method(D_METHOD("type_add", "mesh"), &ProjectileViews::type_add);
+	ClassDB::bind_method(D_METHOD("type_add", "mesh", "scale", "tint"), &ProjectileViews::type_add, DEFVAL(1.0),
+			DEFVAL(Color(1, 1, 1, 1)));
+	ClassDB::bind_method(D_METHOD("take_impacts"), &ProjectileViews::take_impacts);
 	ClassDB::bind_method(D_METHOD("set_lag_inputs", "points", "lags", "local"), &ProjectileViews::set_lag_inputs);
 	ClassDB::bind_method(D_METHOD("lag_at", "at"), &ProjectileViews::lag_at);
 	ClassDB::bind_method(D_METHOD("frame", "swarm", "frames", "alpha", "tps", "net_now", "delta"), &ProjectileViews::frame);
