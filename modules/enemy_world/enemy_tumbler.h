@@ -62,7 +62,7 @@ struct EnemyTumbler {
 	Vector3 point_velocity(const Vector3 &p_r) const { return spin.cross(p_r); }
 	bool staggered() const { return state != STAND || tilt.length() > stagger_angle; }
 	bool resting() const { return state == STAND && tilt.length_squared() < REST_TILT * REST_TILT && spin.length_squared() < REST_SPIN * REST_SPIN; }
-	void place(const Transform3D &p_base) const; // Хит-тело в позу p_base × наклон (мир)
+	void place(const Transform3D &p_base, real_t p_yaw = 0.0f) const; // Хит-тело в позу p_base × наклон × взгляд p_yaw вокруг верха (мир; формы хит-тела — в кадре модели)
 	void log_state() const; // Строка лога смены состояния (имя врага — родитель хит-тела)
 
 private:

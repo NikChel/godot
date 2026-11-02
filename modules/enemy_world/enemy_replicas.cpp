@@ -300,7 +300,7 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		const ObjectID ids[3] = { r.tumb.hit_id, r.arms.tumb[0].hit_id, r.arms.tumb[1].hit_id };
 		const bool seen = body != nullptr && EnemyWake::interest(body->get_global_position() + xf.basis.get_column(1).normalized() * EnemyWake::CENTER_H, wake_points);
 		if (r.wake.update(seen, !r.tumb.resting() || !r.arms.resting(), dt, ids, 3) && body != nullptr) {
-			r.tumb.place(_tumble_base(r, body));
+			r.tumb.place(_tumble_base(r, body), r.yaw); // Поза хит-тела — как у модели (наклон × взгляд)
 			if (r.rig.is_valid()) { // Корень аватара — как его покажет кадр при доле 1
 				const Basis b = xf.basis * r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
 				r.arms.place(**r.rig, r.anim, Transform3D(b, body->get_global_position() - b.get_column(1).normalized() * r.step_lag));

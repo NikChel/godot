@@ -533,7 +533,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 		}
 		_tick_body((int)h, b, body, now, p_delta);
 		if (_wake(b, body, p_delta)) { // Поза тела этого тика — окончательная
-			b.tumb.place(_tumble_base(b, body));
+			b.tumb.place(_tumble_base(b, body), b.yaw); // Поза хит-тела — как у модели (наклон × взгляд)
 			if (b.rig.is_valid()) {
 				b.arms.place(**b.rig, b.anim, _avatar_xf(b, body));
 			}

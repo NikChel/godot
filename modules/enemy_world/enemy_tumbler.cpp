@@ -94,12 +94,12 @@ Basis EnemyTumbler::basis() const {
 	return a > UP_EPS ? Basis(tilt / a, a) : Basis();
 }
 
-void EnemyTumbler::place(const Transform3D &p_base) const {
+void EnemyTumbler::place(const Transform3D &p_base, real_t p_yaw) const {
 	CollisionObject3D *hit = Object::cast_to<CollisionObject3D>(ObjectDB::get_instance(hit_id));
 	if (hit == nullptr || !hit->is_inside_tree()) {
 		return;
 	}
-	const Transform3D pose = p_base * Transform3D(basis(), Vector3());
+	const Transform3D pose = p_base * Transform3D(basis() * Basis(UP_AXIS, p_yaw), Vector3());
 	hit->set_global_transform(pose);
 	PhysicsServer3D::get_singleton()->body_set_state(hit->get_rid(), PhysicsServer3D::BODY_STATE_TRANSFORM, pose); // Сразу этому тику
 }
