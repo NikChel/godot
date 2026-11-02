@@ -344,6 +344,11 @@ int EnemyBodies::body_tumble_state(int p_h) const {
 	return bodies[p_h].tumb.state;
 }
 
+void EnemyBodies::body_set_ragdoll(int p_h, bool p_on) {
+	ERR_FAIL_COND(!_valid(p_h));
+	bodies[p_h].ragdoll = p_on;
+}
+
 void EnemyBodies::body_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r) {
 	ERR_FAIL_COND(!_valid(p_h));
 	ERR_FAIL_COND(p_rig.is_null() || !p_rig->is_built());
@@ -541,8 +546,16 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 // Порядок — EnemyWalker._physics_process (до этапа 2); связь — своя ветка (enemy_bodies_links.cpp).
 void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64_t p_now, real_t p_dt) {
 	Transform3D fx = _carry(r_b, p_body);
+	const uint8_t was = r_b.tumb.state;
 	if (r_b.tumb.step(p_dt)) {
 		r_b.tumb.log_state();
+		if (r_b.tumb.state == EnemyTumbler::FALLING) {
+			_emit(EVENT_FALL, p_h);
+		} else if (r_b.ragdoll && (was == EnemyTumbler::FALLING || was == EnemyTumbler::DOWN)) {
+			r_b.tumb.reset(); // Встаёт с места куклы — не доской из позы неваляшки
+			r_b.rise_end = p_now + _ticks(r_b.tumb.rise_time);
+			_emit(EVENT_RISE, p_h);
+		}
 	}
 	if (r_b.rig.is_valid()) {
 		r_b.anim.step(**r_b.rig, p_dt, r_b.view_speed); // Скорость вдоль торса прошлого тика
@@ -741,7 +754,7 @@ uint64_t EnemyBodies::_ticks(real_t p_s) {
 }
 
 void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now) {
-	if (r_b.tumb.staggered()) { // Оглушён: замах сбит, стоит (и у точки пробы)
+	if (r_b.tumb.staggered() || p_now < r_b.rise_end) { // Оглушён (или встаёт куклой): замах сбит, стоит (и у точки пробы)
 		r_b.brain = BRAIN_STAGGER;
 		r_b.moving = false;
 		return;
@@ -1131,6 +1144,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_tumble_spin", "handle"), &EnemyBodies::body_tumble_spin);
 	ClassDB::bind_method(D_METHOD("body_tilt", "handle"), &EnemyBodies::body_tilt);
 	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);
+	ClassDB::bind_method(D_METHOD("body_set_ragdoll", "handle", "on"), &EnemyBodies::body_set_ragdoll);
 	ClassDB::bind_method(D_METHOD("set_players", "positions", "alive", "ids"), &EnemyBodies::set_players);
 	ClassDB::bind_method(D_METHOD("set_nav_ready", "ready"), &EnemyBodies::set_nav_ready);
 	ClassDB::bind_method(D_METHOD("set_tier_override", "tier"), &EnemyBodies::set_tier_override);
@@ -1159,4 +1173,6 @@ void EnemyBodies::_bind_methods() {
 	BIND_ENUM_CONSTANT(EVENT_JUMP);
 	BIND_ENUM_CONSTANT(EVENT_LINK_CLOSE);
 	BIND_ENUM_CONSTANT(EVENT_LINK_OPEN);
+	BIND_ENUM_CONSTANT(EVENT_FALL);
+	BIND_ENUM_CONSTANT(EVENT_RISE);
 }

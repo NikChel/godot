@@ -73,6 +73,8 @@ public:
 		EVENT_JUMP, // Клип связи (GDScript: EnemyWalker.play_action(JUMP_CLIP))
 		EVENT_LINK_CLOSE, // Закрыть связь в карте (ручка — номер связи; NavLinkSet.set_enabled)
 		EVENT_LINK_OPEN, // Открыть связь в карте (ручка — номер связи)
+		EVENT_FALL, // Неваляшка начала падать (GDScript: кукла — EnemyWalker, spec 2026-11-02-walker-ragdoll-design)
+		EVENT_RISE, // Лежащий куклой встаёт (body_set_ragdoll): неваляшка выпрямлена, мозг держит rise_time
 	};
 
 	// Мозг (WalkerBrain)
@@ -190,6 +192,8 @@ private:
 		LocalVector<uint8_t> link_log; // Виды пройденных связей (пробы)
 		// Неваляшка
 		EnemyTumbler tumb;
+		bool ragdoll = false; // Лежит куклой: подъём неваляшки — выпрямление сразу и EVENT_RISE
+		uint64_t rise_end = 0; // Встаёт куклой до этого тика: мозг оглушён
 		// Анимация и руки
 		Ref<EnemyRig> rig;
 		EnemyAnim anim;
@@ -321,6 +325,9 @@ public:
 	Vector3 body_tumble_spin(int p_h) const;
 	Vector3 body_tilt(int p_h) const;
 	int body_tumble_state(int p_h) const;
+	// Кукла (spec 2026-11-02-walker-ragdoll-design §4): лежит куклой — подъём неваляшки (RISING или STAND после падения)
+	// сразу выпрямляет её (наклон 0), мозг оглушён ещё rise_time (поза встаёт в кадре), событие EVENT_RISE
+	void body_set_ragdoll(int p_h, bool p_on);
 	// Анимация и руки: риг модели и хит-тела рук (левая, правая); разовый клип («библиотека/клип» рига); идёт ли он, клип
 	// и темп (пробы); неваляшка руки (сторона 0 — левая): настройки (предел — рад), толчок (кадр основания), основание
 	// (мир: кадр кости плеча), угловая скорость, наклон

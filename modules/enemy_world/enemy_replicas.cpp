@@ -10,6 +10,9 @@
 
 // «Нет события» — SNAME (статический StringName на уровне файла создавался бы до StringName::setup)
 #define NONE_EVENT SNAME("-")
+// События неваляшки среди клипов тика (spec 2026-11-02-walker-ragdoll-design): начала падать, лежащий куклой встаёт
+#define FALL_CLIP SNAME("@fall")
+#define RISE_CLIP SNAME("@rise")
 
 bool EnemyReplicas::_valid(int p_h) const {
 	return p_h >= 0 && p_h < (int)reps.size() && reps[p_h].used;
@@ -261,8 +264,17 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		if (!r.used) {
 			continue;
 		}
+		const uint8_t was = r.tumb.state;
 		if (r.tumb.step(dt)) {
 			r.tumb.log_state();
+			if (r.tumb.state == EnemyTumbler::FALLING) {
+				due_handles.push_back((int)h);
+				due_clips.push_back(FALL_CLIP);
+			} else if (r.ragdoll && (was == EnemyTumbler::FALLING || was == EnemyTumbler::DOWN)) {
+				r.tumb.reset(); // Как у тела хоста: встаёт с места куклы
+				due_handles.push_back((int)h);
+				due_clips.push_back(RISE_CLIP);
+			}
 		}
 		if (r.rig.is_valid()) {
 			r.anim.step(**r.rig, dt, r.speed); // Скорость снимка прошлого тика
@@ -418,6 +430,11 @@ int EnemyReplicas::replica_tumble_state(int p_h) const {
 	return reps[p_h].tumb.state;
 }
 
+void EnemyReplicas::replica_set_ragdoll(int p_h, bool p_on) {
+	ERR_FAIL_COND(!_valid(p_h));
+	reps[p_h].ragdoll = p_on;
+}
+
 int EnemyReplicas::get_replica_count() const {
 	return (int)(reps.size() - free_handles.size());
 }
@@ -448,6 +465,7 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("replica_tumble_spin", "handle"), &EnemyReplicas::replica_tumble_spin);
 	ClassDB::bind_method(D_METHOD("replica_tilt", "handle"), &EnemyReplicas::replica_tilt);
 	ClassDB::bind_method(D_METHOD("replica_tumble_state", "handle"), &EnemyReplicas::replica_tumble_state);
+	ClassDB::bind_method(D_METHOD("replica_set_ragdoll", "handle", "on"), &EnemyReplicas::replica_set_ragdoll);
 	ClassDB::bind_method(D_METHOD("replica_set_rig", "handle", "rig", "arm_l", "arm_r"), &EnemyReplicas::replica_set_rig);
 	ClassDB::bind_method(D_METHOD("replica_play", "handle", "clip"), &EnemyReplicas::replica_play);
 	ClassDB::bind_method(D_METHOD("replica_acting", "handle"), &EnemyReplicas::replica_acting);

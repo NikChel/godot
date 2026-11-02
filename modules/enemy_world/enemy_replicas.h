@@ -63,6 +63,7 @@ private:
 		real_t speed = 0.0f;
 		real_t step_lag = 0.0f;
 		EnemyTumbler tumb;
+		bool ragdoll = false; // Лежит куклой (как EnemyBodies::Body::ragdoll)
 		Ref<EnemyRig> rig;
 		EnemyAnim anim;
 		EnemyArms arms;
@@ -123,6 +124,8 @@ public:
 	Vector3 replica_tumble_spin(int p_h) const;
 	Vector3 replica_tilt(int p_h) const;
 	int replica_tumble_state(int p_h) const;
+	// Кукла (как EnemyBodies.body_set_ragdoll): события падения и подъёма — в событиях тика (FALL_CLIP / RISE_CLIP)
+	void replica_set_ragdoll(int p_h, bool p_on);
 	// Анимация и руки (как EnemyBodies.body_set_rig / body_play / body_arm_*)
 	void replica_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r);
 	void replica_play(int p_h, const StringName &p_clip);
