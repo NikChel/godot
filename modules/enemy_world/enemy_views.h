@@ -86,6 +86,9 @@ public:
 	int get_space_count() const { return (int)spaces.size(); }
 	void view_set_active(int p_h, bool p_active);
 	void view_reset(int p_h); // Следующая поза — без интерполяции (телепорт)
+	// Модель — в позу этого тика (как покажет кадр в конце тика: доля 1, пространства — поза тика query_xform): корень и
+	// кости. Физ-тик: тот, кто снимает позу модели в физику (кукла), не зависит от частоты кадров
+	void view_snap(int p_h);
 	void frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta);
 
 	int view_tier(int p_h) const;

@@ -153,6 +153,46 @@ void EnemyViews::view_set_active(int p_h, bool p_active) {
 	tier[p_h] = p_active ? TIER_NEAR : TIER_OFF;
 }
 
+void EnemyViews::view_snap(int p_h) {
+	ERR_FAIL_COND(!_valid(p_h));
+	if (!has_pose[p_h]) {
+		return;
+	}
+	Node3D *root = ObjectDB::get_instance<Node3D>(root_id[p_h]);
+	if (root == nullptr) {
+		return;
+	}
+	Transform3D sx;
+	const int s = space_curr[p_h];
+	if (s >= 0 && !spaces.is_empty()) {
+		const Space &sp = spaces[s < (int)spaces.size() ? s : 0];
+		Object *o = ObjectDB::get_instance(sp.node_id);
+		if (sp.frame) {
+			sx = o ? (Transform3D)o->call(SNAME("query_xform")) : Transform3D();
+		} else {
+			Node3D *n = Object::cast_to<Node3D>(o);
+			sx = n ? n->get_global_transform() : Transform3D();
+		}
+	}
+	Transform3D xf = sx * pose_curr[p_h];
+	xf.origin -= xf.basis.get_column(1).normalized() * lag_curr[p_h];
+	root->set_global_transform(xf);
+	if (!has_anim[p_h] || rig[p_h].is_null() || !rig[p_h]->is_built()) {
+		return;
+	}
+	Skeleton3D *skel = ObjectDB::get_instance<Skeleton3D>(skel_id[p_h]);
+	if (skel == nullptr) {
+		return;
+	}
+	const real_t tick_dt = 1.0f / (real_t)MAX(1, Engine::get_singleton()->get_physics_ticks_per_second());
+	const uint32_t k = (uint32_t)p_h * EnemyRig::ARMS;
+	Quaternion tilt[EnemyRig::ARMS];
+	for (int a = 0; a < EnemyRig::ARMS; a++) {
+		tilt[a] = tilt_curr[k + a];
+	}
+	rig[p_h]->apply(anim_prev[p_h].advanced(tick_dt), tilt, skel); // Как кадр при доле 1
+}
+
 void EnemyViews::view_reset(int p_h) {
 	ERR_FAIL_COND(!_valid(p_h));
 	has_pose[p_h] = 0;
@@ -246,6 +286,7 @@ void EnemyViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("space_add", "frame"), &EnemyViews::space_add);
 	ClassDB::bind_method(D_METHOD("get_space_count"), &EnemyViews::get_space_count);
 	ClassDB::bind_method(D_METHOD("view_set_active", "handle", "active"), &EnemyViews::view_set_active);
+	ClassDB::bind_method(D_METHOD("view_snap", "handle"), &EnemyViews::view_snap);
 	ClassDB::bind_method(D_METHOD("view_reset", "handle"), &EnemyViews::view_reset);
 	ClassDB::bind_method(D_METHOD("frame", "alpha", "camera", "delta"), &EnemyViews::frame);
 	ClassDB::bind_method(D_METHOD("view_tier", "handle"), &EnemyViews::view_tier);
