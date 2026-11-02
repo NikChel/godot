@@ -1583,7 +1583,7 @@ PhysXGIEffect::~PhysXGIEffect() {
 			rd->free_rid(shaders[i]);
 		}
 	}
-	for (RID r : { linear_sampler, nearest_sampler, data_buffers[0], data_buffers[1], primitive_buffer, node_buffer, cache_keys, cache_cells, geometry_buffer }) {
+	for (RID r : { linear_sampler, nearest_sampler, data_buffer, primitive_buffer, node_buffer, cache_keys, cache_cells, geometry_buffer }) {
 		if (r.is_valid()) {
 			rd->free_rid(r);
 		}
@@ -1624,10 +1624,7 @@ bool PhysXGIEffect::_ensure(RenderingDevice *p_rd) {
 	state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
 	state.min_filter = RD::SAMPLER_FILTER_NEAREST;
 	nearest_sampler = p_rd->sampler_create(state);
-	for (int i = 0; i < MAX_VIEWS; i++) {
-		data_buffers[i] = p_rd->uniform_buffer_create(sizeof(FrameData));
-	}
-	data_buffer = data_buffers[0];
+	data_buffer = p_rd->uniform_buffer_create(sizeof(FrameData));
 	{
 		Vector<uint8_t> zeros;
 		zeros.resize(CACHE_SLOTS * sizeof(uint32_t));
@@ -1735,16 +1732,50 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 		return;
 	}
 	const Size2i size = buffers->get_internal_size();
-	// NikChel: VR draws both eyes in one pass (multiview): Godot's buffers hold a layer per eye. Each eye is traced on its
-	// own layers, from its own pose and projection, with its own history; the radiance cache is shared.
-	const uint32_t view_count = CLAMP(buffers->get_view_count(), 1u, (uint32_t)MAX_VIEWS);
-	const RD::TextureFormat out_format = rd->texture_get_format(buffers->get_texture(gi_scope, ambient_name));
+	const RID ambient = buffers->get_texture(gi_scope, ambient_name);
+	const RID reflection = buffers->get_texture(gi_scope, reflection_name);
+	const RID normal = buffers->get_texture(clustered_scope, normal_name);
+	const RID depth = buffers->get_depth_texture();
+	const RID color = buffers->get_internal_texture(); // still last frame's image: the opaque pass hasn't run yet
+	const RD::TextureFormat out_format = rd->texture_get_format(ambient);
 	const Size2i out_size(out_format.width, out_format.height);
+	// This viewport's targets and history.
+	static const StringName view_scope = "pxtgi";
+	Ref<PhysXGIView> view = buffers->has_custom_data(view_scope) ? Ref<PhysXGIView>(buffers->get_custom_data(view_scope)) : Ref<PhysXGIView>();
+	if (view.is_null()) {
+		view.instantiate();
+		buffers->set_custom_data(view_scope, view);
+	}
+	PhysXGIView &v = *view.ptr();
+	v.ensure(rd, size);
+
+	const Transform3D cam_transform = scene->get_cam_transform();
+	// The raw projection, as Godot's own GI step uses it: get_cam_projection() already has the depth correction (and TAA
+	// jitter) applied, which the depth linearisation below doesn't expect.
 	const RenderSceneDataRD *scene_rd = Object::cast_to<RenderSceneDataRD>(scene);
 	ERR_FAIL_NULL(scene_rd);
+	const Projection projection = scene_rd->cam_projection;
+	if (v.have_history && (cam_transform != v.prev_cam_transform || projection != v.prev_projection)) {
+		unsettle();
+	}
+	if (!v.have_history) {
+		v.prev_cam_transform = cam_transform;
+		v.prev_projection = projection;
+	}
 	FrameData data = {};
+	RendererRD::MaterialStorage::store_transform(cam_transform, data.view_to_world);
+	RendererRD::MaterialStorage::store_transform(cam_transform.affine_inverse(), data.world_to_view);
+	RendererRD::MaterialStorage::store_transform(v.prev_cam_transform.affine_inverse(), data.world_to_prev_view);
+	projection_info(projection, size, data.proj_info);
+	projection_info(v.prev_projection, size, data.prev_proj_info);
+	data.clip[0] = projection.get_z_near();
+	data.clip[1] = projection.get_z_far();
+	data.clip[2] = v.prev_projection.get_z_near();
+	data.clip[3] = v.prev_projection.get_z_far();
 	data.sizes[0] = size.x;
 	data.sizes[1] = size.y;
+	data.sizes[2] = v.trace_size.x;
+	data.sizes[3] = v.trace_size.y;
 	data.misc[0] = (float)(frame++ % 4096);
 	data.misc[1] = s.max_distance;
 	data.misc[2] = s.intensity;
@@ -1876,6 +1907,7 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 		data.omni_color[i][2] = s.omni_color[i].b * exposure;
 		data.omni_color[i][3] = s.omni_attenuation[i];
 	}
+	rd->buffer_update(data_buffer, 0, sizeof(data), &data);
 
 	// The shapes, grown as needed (an empty buffer can't be bound: at least one); sent only when they changed.
 	const bool send_primitives = s.primitives_version != primitives_uploaded;
@@ -1922,92 +1954,39 @@ void PhysXGIEffect::_render(int p_callback_type, const RenderData *p_render_data
 	auto sampled = [&](int p_binding, const RID &p_sampler, const RID &p_texture) {
 		return RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, p_binding, Vector<RID>({ p_sampler, p_texture }));
 	};
-	static const StringName view_scopes[MAX_VIEWS] = { "pxtgi", "pxtgi_eye1" };
-	for (uint32_t eye = 0; eye < view_count; eye++) {
-		const bool stereo = view_count > 1;
-		const RID ambient = stereo ? buffers->get_texture_slice(gi_scope, ambient_name, eye, 0) : buffers->get_texture(gi_scope, ambient_name);
-		const RID reflection = stereo ? buffers->get_texture_slice(gi_scope, reflection_name, eye, 0) : buffers->get_texture(gi_scope, reflection_name);
-		const RID normal = stereo ? buffers->get_texture_slice(clustered_scope, normal_name, eye, 0) : buffers->get_texture(clustered_scope, normal_name);
-		const RID depth = stereo ? buffers->get_depth_texture(eye) : buffers->get_depth_texture();
-		// Still last frame's image: the opaque pass hasn't run yet.
-		const RID color = stereo ? buffers->get_internal_texture(eye) : buffers->get_internal_texture();
-		// This viewport's (this eye's) targets and history.
-		Ref<PhysXGIView> view = buffers->has_custom_data(view_scopes[eye]) ? Ref<PhysXGIView>(buffers->get_custom_data(view_scopes[eye])) : Ref<PhysXGIView>();
-		if (view.is_null()) {
-			view.instantiate();
-			buffers->set_custom_data(view_scopes[eye], view);
-		}
-		PhysXGIView &v = *view.ptr();
-		v.ensure(rd, size);
+	const int prev = v.current;
+	v.current = 1 - v.current;
 
-		// The raw projection, as Godot's own GI step uses it: get_cam_projection() already has the depth correction (and
-		// TAA jitter) applied, which the depth linearisation below doesn't expect. An eye's view_projection maps the centre
-		// camera's view space to the eye's clip space (the eye's offset folded in); the passes take a camera pose and a
-		// plain projection, so the eye's pose and projection are taken apart from it (eyes parallel to the centre camera,
-		// as Godot's multiview passes the eye offset alone).
-		Transform3D cam_transform = scene->get_cam_transform();
-		Projection projection = scene_rd->cam_projection;
-		if (stereo) {
-			const Transform3D eye_offset(Basis(), scene_rd->view_eye_offset[eye]);
-			cam_transform = cam_transform * eye_offset;
-			projection = scene_rd->view_projection[eye] * Projection(eye_offset);
-		}
-		if (v.have_history && (cam_transform != v.prev_cam_transform || projection != v.prev_projection)) {
-			unsettle();
-		}
-		if (!v.have_history) {
-			v.prev_cam_transform = cam_transform;
-			v.prev_projection = projection;
-		}
-		FrameData d = data;
-		RendererRD::MaterialStorage::store_transform(cam_transform, d.view_to_world);
-		RendererRD::MaterialStorage::store_transform(cam_transform.affine_inverse(), d.world_to_view);
-		RendererRD::MaterialStorage::store_transform(v.prev_cam_transform.affine_inverse(), d.world_to_prev_view);
-		projection_info(projection, size, d.proj_info);
-		projection_info(v.prev_projection, size, d.prev_proj_info);
-		d.clip[0] = projection.get_z_near();
-		d.clip[1] = projection.get_z_far();
-		d.clip[2] = v.prev_projection.get_z_near();
-		d.clip[3] = v.prev_projection.get_z_far();
-		d.sizes[2] = v.trace_size.x;
-		d.sizes[3] = v.trace_size.y;
-		data_buffer = data_buffers[eye];
-		rd->buffer_update(data_buffer, 0, sizeof(d), &d);
-
-		const int prev = v.current;
-		v.current = 1 - v.current;
-
-		if (eye == 0 && s.multi_bounce && s.primitive_count > 0) {
-			_dispatch(rd, PASS_CACHE, { sampled(0, nearest_sampler, depth), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, Size2i(CACHE_ROW, CACHE_SLOTS / CACHE_ROW / 4), nullptr, 0);
-		}
-		_dispatch(rd, PASS_TRACE, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, v.trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, v.trace_size, nullptr, 0);
-
-		int32_t history[4] = { v.have_history ? 1 : 0, 0, 0, 0 };
-		_dispatch(rd, PASS_TEMPORAL, { sampled(0, nearest_sampler, v.trace), sampled(1, linear_sampler, v.accum[prev]), sampled(2, nearest_sampler, v.accum_depth[prev]), sampled(3, nearest_sampler, depth), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, v.accum[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.accum_depth[v.current]), sampled(6, linear_sampler, v.moments[prev]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, v.moments[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, v.variance) }, v.trace_size, history, sizeof(history));
-
-		// Three filter passes, the taps 1, 2 and 4 texels apart.
-		RID light_in = v.accum[v.current];
-		RID variance_in = v.variance;
-		for (int i = 0; i < 3; i++) {
-			int32_t step[4] = { 1 << i, 0, 0, 0 };
-			_dispatch(rd, PASS_ATROUS, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, variance_in), sampled(2, nearest_sampler, v.accum_depth[v.current]), sampled(3, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, v.filtered[i & 1]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.filtered_variance[i & 1]) }, v.trace_size, step, sizeof(step));
-			light_in = v.filtered[i & 1];
-			variance_in = v.filtered_variance[i & 1];
-		}
-
-		{
-			int32_t size[4] = { v.reflect_size.x, v.reflect_size.y, 0, 0 };
-			_dispatch(rd, PASS_REFLECT, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, v.reflect_trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, v.reflect_size, size, sizeof(size));
-			size[2] = v.have_history ? 1 : 0;
-			_dispatch(rd, PASS_REFLECT_TEMPORAL, { sampled(0, nearest_sampler, v.reflect_trace), sampled(1, linear_sampler, v.reflect_accum[prev]), sampled(2, nearest_sampler, v.reflect_depth[prev]), sampled(3, nearest_sampler, depth), sampled(4, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.reflect_accum[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, v.reflect_depth[v.current]) }, v.reflect_size, size, sizeof(size));
-		}
-
-		int32_t out[4] = { out_size.x, out_size.y, v.reflect_size.x, v.reflect_size.y };
-		_dispatch(rd, PASS_RESOLVE, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, v.accum_depth[v.current]), sampled(2, nearest_sampler, depth), sampled(3, nearest_sampler, normal), sampled(6, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ambient), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflection), sampled(7, nearest_sampler, v.reflect_accum[v.current]), sampled(8, nearest_sampler, v.reflect_depth[v.current]) }, out_size, out, sizeof(out));
-
-		v.have_history = true;
-		v.prev_cam_transform = cam_transform;
-		v.prev_projection = projection;
+	if (s.multi_bounce && s.primitive_count > 0) {
+		_dispatch(rd, PASS_CACHE, { sampled(0, nearest_sampler, depth), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, Size2i(CACHE_ROW, CACHE_SLOTS / CACHE_ROW / 4), nullptr, 0);
 	}
+	_dispatch(rd, PASS_TRACE, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, v.trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, v.trace_size, nullptr, 0);
+
+	int32_t history[4] = { v.have_history ? 1 : 0, 0, 0, 0 };
+	_dispatch(rd, PASS_TEMPORAL, { sampled(0, nearest_sampler, v.trace), sampled(1, linear_sampler, v.accum[prev]), sampled(2, nearest_sampler, v.accum_depth[prev]), sampled(3, nearest_sampler, depth), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, v.accum[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.accum_depth[v.current]), sampled(6, linear_sampler, v.moments[prev]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, v.moments[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, v.variance) }, v.trace_size, history, sizeof(history));
+
+	// Three filter passes, the taps 1, 2 and 4 texels apart.
+	RID light_in = v.accum[v.current];
+	RID variance_in = v.variance;
+	for (int i = 0; i < 3; i++) {
+		int32_t step[4] = { 1 << i, 0, 0, 0 };
+		_dispatch(rd, PASS_ATROUS, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, variance_in), sampled(2, nearest_sampler, v.accum_depth[v.current]), sampled(3, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, v.filtered[i & 1]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.filtered_variance[i & 1]) }, v.trace_size, step, sizeof(step));
+		light_in = v.filtered[i & 1];
+		variance_in = v.filtered_variance[i & 1];
+	}
+
+	{
+		int32_t size[4] = { v.reflect_size.x, v.reflect_size.y, 0, 0 };
+		_dispatch(rd, PASS_REFLECT, { sampled(0, nearest_sampler, depth), sampled(1, nearest_sampler, normal), sampled(2, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, v.reflect_trace), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, primitive_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, node_buffer), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cache_keys), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cache_cells), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, geometry_buffer), sampled(11, linear_sampler, sky_map) }, v.reflect_size, size, sizeof(size));
+		size[2] = v.have_history ? 1 : 0;
+		_dispatch(rd, PASS_REFLECT_TEMPORAL, { sampled(0, nearest_sampler, v.reflect_trace), sampled(1, linear_sampler, v.reflect_accum[prev]), sampled(2, nearest_sampler, v.reflect_depth[prev]), sampled(3, nearest_sampler, depth), sampled(4, nearest_sampler, normal), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, v.reflect_accum[v.current]), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, v.reflect_depth[v.current]) }, v.reflect_size, size, sizeof(size));
+	}
+
+	int32_t out[4] = { out_size.x, out_size.y, v.reflect_size.x, v.reflect_size.y };
+	_dispatch(rd, PASS_RESOLVE, { sampled(0, nearest_sampler, light_in), sampled(1, nearest_sampler, v.accum_depth[v.current]), sampled(2, nearest_sampler, depth), sampled(3, nearest_sampler, normal), sampled(6, linear_sampler, color), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ambient), RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflection), sampled(7, nearest_sampler, v.reflect_accum[v.current]), sampled(8, nearest_sampler, v.reflect_depth[v.current]) }, out_size, out, sizeof(out));
+
 	rd->capture_timestamp("PXTGI end");
+	v.have_history = true;
+	v.prev_cam_transform = cam_transform;
+	v.prev_projection = projection;
 }

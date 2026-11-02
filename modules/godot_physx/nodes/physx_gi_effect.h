@@ -170,10 +170,7 @@ private:
 	RID pipelines[PASS_MAX];
 	RID linear_sampler;
 	RID nearest_sampler;
-	// NikChel: VR draws both eyes in one pass (multiview); each eye has its own frame data.
-	static constexpr int MAX_VIEWS = 2;
-	RID data_buffers[MAX_VIEWS]; // the frame's matrices, one per eye
-	RID data_buffer; // the one the passes read: this eye's
+	RID data_buffer; // the frame's matrices
 	RID primitive_buffer;
 	int primitive_capacity = 0;
 	uint64_t primitives_uploaded = UINT64_MAX;
