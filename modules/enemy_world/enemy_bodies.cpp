@@ -551,7 +551,7 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 		r_b.tumb.log_state();
 		if (r_b.tumb.state == EnemyTumbler::FALLING) {
 			_emit(EVENT_FALL, p_h);
-		} else if (r_b.ragdoll && (was == EnemyTumbler::FALLING || was == EnemyTumbler::DOWN)) {
+		} else if (r_b.ragdoll && r_b.tumb.state != EnemyTumbler::DOWN && (was == EnemyTumbler::FALLING || was == EnemyTumbler::DOWN)) {
 			r_b.tumb.reset(); // Встаёт с места куклы — не доской из позы неваляшки
 			r_b.rise_end = p_now + _ticks(r_b.tumb.rise_time);
 			_emit(EVENT_RISE, p_h);

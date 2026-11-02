@@ -270,7 +270,7 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			if (r.tumb.state == EnemyTumbler::FALLING) {
 				due_handles.push_back((int)h);
 				due_clips.push_back(FALL_CLIP);
-			} else if (r.ragdoll && (was == EnemyTumbler::FALLING || was == EnemyTumbler::DOWN)) {
+			} else if (r.ragdoll && r.tumb.state != EnemyTumbler::DOWN && (was == EnemyTumbler::FALLING || was == EnemyTumbler::DOWN)) {
 				r.tumb.reset(); // Как у тела хоста: встаёт с места куклы
 				due_handles.push_back((int)h);
 				due_clips.push_back(RISE_CLIP);
