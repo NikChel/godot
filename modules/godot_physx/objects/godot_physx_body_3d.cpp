@@ -917,6 +917,12 @@ void GodotPhysXBody3D::_collision_exceptions_changed() {
 	// Pairs already touching keep their old filter result until re-filtered.
 	PxRigidActor *actor = _state_actor();
 	if (actor && actor->getScene()) {
+		// Re-filtering finds the body's trigger pairs again (an entry), but their loss never reaches the areas: they take
+		// the pairs back first (an exit and the re-entry of the same step cancel out), or each re-found pair is a second
+		// entry and the body never leaves the area.
+		if (space) {
+			space->body_actor_gone(this);
+		}
 		actor->getScene()->resetFiltering(*actor);
 	}
 }
