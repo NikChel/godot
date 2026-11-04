@@ -32,51 +32,11 @@ int ProjectileViews::type_add(RID p_mesh, real_t p_scale, const Color &p_tint) {
 }
 
 void ProjectileViews::set_lag_inputs(const PackedVector3Array &p_points, const PackedFloat64Array &p_lags, int p_local) {
-	// Своя копия: вызывающий переписывает свои массивы каждый кадр (общий буфер копировался бы при каждой его записи).
-	lag_points.resize((uint32_t)p_points.size());
-	for (int i = 0; i < p_points.size(); i++) {
-		lag_points[i] = p_points[i];
-	}
-	lags.resize((uint32_t)p_lags.size());
-	for (int i = 0; i < p_lags.size(); i++) {
-		lags[i] = p_lags[i];
-	}
-	lag_local = p_local;
+	view_lag.set(p_points, p_lags, p_local);
 }
 
-// Расстояние от точки до зоны касания игрока, м (0 — в зоне) — ItemViewTime.zone_gap.
-double ProjectileViews::_gap(int p_player, const Vector3 &p_at) const {
-	const Vector3 *pts = lag_points.ptr() + p_player * 4;
-	double g = MIN((double)pts[0].distance_to(p_at), (double)pts[1].distance_to(p_at)) - STEAL_BODY_R;
-	g = MIN(g, (double)pts[2].distance_to(p_at) - STEAL_HAND_R);
-	g = MIN(g, (double)pts[3].distance_to(p_at) - STEAL_HAND_R);
-	return MAX(g, 0.0);
-}
-
-// Задержка показа точки, с — ItemViewTime.lag_at: у своих ног 0, у чужих — время его аватара, по дороге —
-// пропорционально расстояниям до зон касания.
 double ProjectileViews::lag_at(const Vector3 &p_at) const {
-	const int n = (int)lags.size();
-	if (lag_local < 0 || lag_local >= n || (int)lag_points.size() < n * 4) {
-		return 0.0;
-	}
-	const double g_me = _gap(lag_local, p_at);
-	double g_them = Math::INF;
-	double lag_them = 0.0;
-	for (int i = 0; i < n; i++) {
-		if (i == lag_local) {
-			continue;
-		}
-		const double g = _gap(i, p_at);
-		if (g < g_them) {
-			g_them = g;
-			lag_them = lags[i];
-		}
-	}
-	if (g_them < Math::INF && g_me + g_them > 0.0) { // Оба в зоне — у своих ног (настоящее)
-		return lag_them * g_me / (g_me + g_them);
-	}
-	return 0.0;
+	return view_lag.lag_at(p_at);
 }
 
 void ProjectileViews::_put(int p_type, const Vector3 &p_at, real_t p_scale) {

@@ -88,7 +88,9 @@ void ProjectileSwarm::stop(int64_t p_key, double p_age, const Vector3 &p_point, 
 		return; // Свой решает сам; позже своей остановки — не берётся
 	}
 	s.stop_age = p_age;
-	s.swept_age = MIN(s.swept_age, p_age);
+	// Пройдено до остановки владельца: показ доходит до точки касания, даже если свип реплики до неё ещё не дошёл
+	// (остановка от стрелка раньше свипа — снаряд не замирает перед целью).
+	s.swept_age = p_age;
 	s.has_impact = true;
 	s.hit_point = p_point;
 	s.hit_normal = p_normal;
