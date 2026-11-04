@@ -18,7 +18,7 @@ void ProjectileViews::setup(RID p_scenario) {
 	scenario = p_scenario;
 }
 
-int ProjectileViews::type_add(RID p_mesh, real_t p_scale, const Color &p_tint) {
+int ProjectileViews::type_add(RID p_mesh, real_t p_scale, const Color &p_tint, double p_trail) {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	Type t;
 	t.multimesh = rs->multimesh_create();
@@ -27,6 +27,7 @@ int ProjectileViews::type_add(RID p_mesh, real_t p_scale, const Color &p_tint) {
 	rs->instance_geometry_set_cast_shadows_setting(t.instance, RSE::SHADOW_CASTING_SETTING_OFF);
 	rs->instance_geometry_set_shader_parameter(t.instance, "tint", p_tint);
 	t.scale = p_scale;
+	t.trail = MAX(0.0, p_trail);
 	types.push_back(t);
 	return (int)types.size() - 1;
 }
@@ -39,29 +40,34 @@ double ProjectileViews::lag_at(const Vector3 &p_at) const {
 	return view_lag.lag_at(p_at);
 }
 
-void ProjectileViews::_put(int p_type, const Vector3 &p_at, real_t p_scale) {
+void ProjectileViews::_put(int p_type, const Vector3 &p_head, const Vector3 &p_tail, real_t p_scale) {
 	if (p_type < 0 || p_type >= (int)types.size()) {
 		return;
 	}
 	Type &t = types[p_type];
 	const real_t s = p_scale * t.scale;
+	// Меш радиуса 1 м × s; трасса — вдоль хвост → голова: полуось (длина / 2 + s), центр — середина.
+	Basis b = Basis::from_scale(Vector3(s, s, s));
+	Vector3 at = p_head;
+	const Vector3 d = p_head - p_tail;
+	const real_t len = d.length();
+	if (len > (real_t)CMP_EPSILON) {
+		const Vector3 z = d / len;
+		const Vector3 x = z.get_any_perpendicular();
+		b = Basis(x * s, z.cross(x) * s, z * (0.5f * len + s));
+		at = (p_head + p_tail) * 0.5f;
+	}
 	if ((t.count + 1) * STRIDE > t.buf.size()) {
 		// Хвост — нули: Vector::resize не заполняет float, а AABB MultiMesh считается по всему буферу.
 		t.buf.resize_initialized(MAX(16, t.buf.size() / STRIDE * 2) * STRIDE);
 	}
 	float *w = t.buf.ptrw() + t.count * STRIDE;
-	w[0] = s;
-	w[1] = 0.0f;
-	w[2] = 0.0f;
-	w[3] = p_at.x;
-	w[4] = 0.0f;
-	w[5] = s;
-	w[6] = 0.0f;
-	w[7] = p_at.y;
-	w[8] = 0.0f;
-	w[9] = 0.0f;
-	w[10] = s;
-	w[11] = p_at.z;
+	for (int r = 0; r < 3; r++) {
+		w[r * 4 + 0] = b.rows[r][0];
+		w[r * 4 + 1] = b.rows[r][1];
+		w[r * 4 + 2] = b.rows[r][2];
+		w[r * 4 + 3] = at[r];
+	}
 	t.count++;
 }
 
@@ -119,11 +125,13 @@ void ProjectileViews::frame(const Ref<ProjectileSwarm> &p_swarm, int64_t p_frame
 			}
 			const Vector3 p = s.pos_at(age);
 			s.shown = p;
-			_put(s.view_type, p, 1.0f);
+			const bool known = s.view_type >= 0 && s.view_type < (int)types.size();
+			const double trail = known ? types[s.view_type].trail : 0.0;
+			_put(s.view_type, p, trail > 0.0 ? s.pos_at(MAX(0.0, age - trail)) : p, 1.0f);
 		}
 	}
 	for (const Flash &fl : flashes) {
-		_put(fl.type, fl.at, FLASH_SCALE * (real_t)(fl.left / FLASH_S));
+		_put(fl.type, fl.at, fl.at, FLASH_SCALE * (real_t)(fl.left / FLASH_S));
 	}
 	for (Type &t : types) {
 		_commit(t);
@@ -146,8 +154,8 @@ int ProjectileViews::visible_count() const {
 
 void ProjectileViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("setup", "scenario"), &ProjectileViews::setup);
-	ClassDB::bind_method(D_METHOD("type_add", "mesh", "scale", "tint"), &ProjectileViews::type_add, DEFVAL(1.0),
-			DEFVAL(Color(1, 1, 1, 1)));
+	ClassDB::bind_method(D_METHOD("type_add", "mesh", "scale", "tint", "trail"), &ProjectileViews::type_add, DEFVAL(1.0),
+			DEFVAL(Color(1, 1, 1, 1)), DEFVAL(0.0));
 	ClassDB::bind_method(D_METHOD("take_impacts"), &ProjectileViews::take_impacts);
 	ClassDB::bind_method(D_METHOD("set_lag_inputs", "points", "lags", "local"), &ProjectileViews::set_lag_inputs);
 	ClassDB::bind_method(D_METHOD("lag_at", "at"), &ProjectileViews::lag_at);
