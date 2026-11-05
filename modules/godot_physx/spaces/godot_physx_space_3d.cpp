@@ -676,9 +676,10 @@ public:
 	const HashSet<ObjectID> *exclude_objects = nullptr;
 	uint32_t self_layer = 0;
 	uint32_t self_mask = 0;
+	const PxShape *skip_shape = nullptr; // NikChel: test_body_motion's sweep past a shape it started in
 
 	virtual PxQueryHitType::Enum preFilter(const PxFilterData &, const PxShape *p_shape, const PxRigidActor *p_actor, PxHitFlags &) override {
-		if (p_actor == self_actor) {
+		if (p_actor == self_actor || (skip_shape && p_shape == skip_shape)) {
 			return PxQueryHitType::eNONE;
 		}
 		if (p_shape && (p_shape->getFlags() & PxShapeFlag::eTRIGGER_SHAPE)) {
@@ -800,6 +801,11 @@ bool separation_ray_push(const SeparationRay &p_ray, const PxRaycastHit &p_hit, 
 // adjacency data or no neighbour (mesh border) -- convex, keep PhysX's normal.
 constexpr PxReal INTERNAL_EDGE_EPS = 0.002f;
 constexpr PxReal INTERNAL_EDGE_COS = 0.985f; // ~10 degrees
+
+// NikChel: a motion test's shape that starts in a floor-like surface and moves into it -- more than this cos of
+// the angle between the motion and the push-out (snapping down onto it, landing, walking into a ramp steeper than
+// 30 degrees) -- is stopped there. Shallower, it walks on.
+constexpr PxReal INTO_SURFACE_COS = 0.5f;
 
 bool trimesh_internal_hit(const PxTriangleMeshGeometry &p_geom, const PxTransform &p_pose, PxU32 p_face, const PxVec3 &p_point, PxVec3 &r_face_n) {
 	const bool has_adj = p_geom.triangleMesh && (p_geom.triangleMesh->getTriangleMeshFlags() & PxTriangleMeshFlag::eADJACENCY_INFO);
@@ -1028,11 +1034,16 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 				const GodotPhysXShape3D::ScaledGeometry sg = sr->shape->scaled_geometry(motion_scale * sr->xform.basis.get_scale());
 				const PxTransform pose = sweep_from * to_px(sr->xform) * sg.local_pose;
 
-				PxSweepBuffer hit;
-				if (px_scene->sweep(sg.geom.any(), pose, unit_dir, (PxReal)motion_len, hit,
-							PxHitFlag::ePOSITION | PxHitFlag::eNORMAL | PxHitFlag::eMTD,
-							fd, &filter, nullptr, 0.0f) &&
-						hit.hasBlock) {
+				// NikChel: a second attempt sweeps past the shape the first one started in (see below).
+				filter.skip_shape = nullptr;
+				for (int attempt = 0; attempt < 2; attempt++) {
+					PxSweepBuffer hit;
+					if (!px_scene->sweep(sg.geom.any(), pose, unit_dir, (PxReal)motion_len, hit,
+								PxHitFlag::ePOSITION | PxHitFlag::eNORMAL | PxHitFlag::eMTD,
+								fd, &filter, nullptr, 0.0f) ||
+							!hit.hasBlock) {
+						break;
+					}
 					// Internal-edge fix: sweeping over a triangle-mesh surface catches
 					// on the shared edges between facets and PhysX hands back the edge
 					// normal (often axis-aligned, looks like a wall). A capsule or
@@ -1087,7 +1098,7 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 					if (hit.block.distance <= 0.0f) {
 						const PxF32 pen = -hit.block.distance;
 						if (skip_one_sided_overlap(hit.block.actor, hit.block.shape, -1.0f, hit.block.normal, motion_dir, sg.geom.any(), pose)) {
-							continue;
+							break;
 						}
 						mtd_recover += hit.block.normal * (pen + margin);
 						const bool round = mover_type == PxGeometryType::eCAPSULE || mover_type == PxGeometryType::eSPHERE;
@@ -1098,7 +1109,7 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 						const PxReal push_back = -(hit.block.normal.x * unit_dir.x + hit.block.normal.z * unit_dir.z);
 						if (pass == 0 && round && push_back > 0.02f && (hit.block.shape->getGeometry().getType() == PxGeometryType::eTRIANGLEMESH || hit.block.shape->getGeometry().getType() == PxGeometryType::eHEIGHTFIELD)) {
 							resweep = true;
-							continue;
+							break;
 						}
 						// NikChel: any other initial overlap is swept again too. A sweep stops at
 						// its initial overlap, so whatever lies further along the motion goes
@@ -1107,15 +1118,26 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 						if (pass == 0) {
 							resweep = true;
 						}
-						// Only report a floor-like overlap so move_and_slide keeps a
-						// character grounded. Near-horizontal push-outs here are
-						// almost always a facet edge the capsule is grazing -- just
-						// depenetrate, don't treat it as a wall that stops the travel
-						// (that leaves a walking character frozen mid-slope).
-						if (hit.block.normal.y > 0.3f && (!has_hit || safe_fraction > (real_t)0.0)) {
+						const PxReal into = hit.block.normal.dot(-unit_dir);
+						bool stopped = false;
+						if (hit.block.normal.y > 0.3f && into > INTO_SURFACE_COS) {
+							// NikChel: moving into a floor-like surface it already overlaps (snapping
+							// down onto it, landing) stops the travel there. Reported with the full
+							// travel, the floor snap dropped a character pressed into the floor (by a
+							// sloped ceiling over it) the whole snap length below the floor.
+							safe_fraction = 0.0;
 							best_hit = hit.block;
 							has_hit = true;
-						} else if (round && hit.block.normal.dot(-unit_dir) >= 0.001f) {
+							stopped = true;
+						} else if (hit.block.normal.y > 0.3f && (!has_hit || safe_fraction > (real_t)0.0)) {
+							// Only report a floor-like overlap so move_and_slide keeps a
+							// character grounded. Near-horizontal push-outs here are
+							// almost always a facet edge the capsule is grazing -- just
+							// depenetrate, don't treat it as a wall that stops the travel
+							// (that leaves a walking character frozen mid-slope).
+							best_hit = hit.block;
+							has_hit = true;
+						} else if (round && into >= 0.001f) {
 							// A capsule's or sphere's push-out is its true contact
 							// normal (above), never a facet edge: a near-horizontal one
 							// is a wall or a step's face it's pressed against. It
@@ -1125,14 +1147,23 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 							safe_fraction = 0.0;
 							best_hit = hit.block;
 							has_hit = true;
+							stopped = true;
 						}
-						continue;
+						// NikChel: an overlap that doesn't stop the travel hides whatever lies further
+						// along it (a sweep reports only its initial overlap). On the re-sweep, sweep once
+						// more past that shape: a wall ahead of a character standing in a mesh floor went
+						// through by a whole step; the floor under one pressed down by a sloped ceiling.
+						if (pass == 1 && attempt == 0 && !stopped) {
+							filter.skip_shape = hit.block.shape;
+							continue;
+						}
+						break;
 					}
 					// Ignore contacts that don't actually oppose the motion: a hit
 					// whose normal faces along (rather than against) the sweep is a
 					// grazing/edge contact from sliding on a surface.
 					if (hit.block.normal.dot(-unit_dir) < 0.001f) {
-						continue;
+						break;
 					}
 					const real_t frac = CLAMP((real_t)hit.block.distance / motion_len, (real_t)0.0, (real_t)1.0);
 					if (frac < safe_fraction) {
@@ -1140,7 +1171,9 @@ bool GodotPhysXSpace3D::test_body_motion(GodotPhysXBody3D *p_body, const Physics
 						best_hit = hit.block;
 						has_hit = true;
 					}
+					break;
 				}
+				filter.skip_shape = nullptr;
 			}
 		}
 	}
