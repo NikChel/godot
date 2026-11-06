@@ -97,6 +97,10 @@ PxFilterFlags godot_physx_filter_shader(
 				PxPairFlag::eNOTIFY_TOUCH_LOST |
 				PxPairFlag::eNOTIFY_CONTACT_POINTS;
 	}
+	// A body with a contact force limit: its pairs go to g_force_limit_callback.
+	if ((filter_data0.word2 | filter_data1.word2) & GodotPhysXBody3D::FILTER_LIMITS_CONTACT_FORCE) {
+		pair_flags |= PxPairFlag::eMODIFY_CONTACTS;
+	}
 	// A body with collision exceptions: the (stateless) shader can't look
 	// them up, so its pairs go to g_filter_callback to decide.
 	if ((filter_data0.word2 | filter_data1.word2) & GodotPhysXBody3D::FILTER_HAS_EXCEPTIONS) {
@@ -205,8 +209,37 @@ public:
 	virtual void onAdvance(const PxRigidBody *const *, const PxTransform *, PxU32) override {}
 };
 
+// Contact force limit (PhysX.body_set_contact_force_limit()): the solver gives a shape pair with a limited body at most
+// limit x step of impulse in a step (the lower limit when both have one), shared evenly by its contact points -- a
+// kinematic body pushes with that force at most instead of its infinite mass; a body resting on it stays while its
+// weight is under the limit. Only pairs the shader flags reach it. The SDK calls it from its worker threads,
+// concurrently: it only reads the bodies (their limits change between steps).
+class ForceLimitCallback : public PxContactModifyCallback {
+public:
+	virtual void onContactModify(PxContactModifyPair *const p_pairs, PxU32 p_count) override {
+		for (PxU32 i = 0; i < p_count; i++) {
+			PxContactModifyPair &pair = p_pairs[i];
+			const GodotPhysXBody3D *b0 = actor_body(pair.actor[0]);
+			const GodotPhysXBody3D *b1 = actor_body(pair.actor[1]);
+			const real_t f0 = b0 ? b0->get_contact_force_limit() : 0.0;
+			const real_t f1 = b1 ? b1->get_contact_force_limit() : 0.0;
+			const real_t f = (f0 > 0.0 && f1 > 0.0) ? MIN(f0, f1) : MAX(f0, f1);
+			const GodotPhysXSpace3D *space = f0 > 0.0 ? b0->get_space() : (f1 > 0.0 ? b1->get_space() : nullptr);
+			const PxU32 n = pair.contacts.size();
+			if (!space || n == 0) {
+				continue;
+			}
+			const PxReal max_impulse = (PxReal)(f * space->get_last_step()) / (PxReal)n;
+			for (PxU32 k = 0; k < n; k++) {
+				pair.contacts.setMaxImpulse(k, MIN(pair.contacts.getMaxImpulse(k), max_impulse));
+			}
+		}
+	}
+};
+
 ContactCallback g_contact_callback;
 ExceptionFilterCallback g_filter_callback;
+ForceLimitCallback g_force_limit_callback;
 
 } //namespace
 
@@ -220,6 +253,7 @@ GodotPhysXSpace3D::GodotPhysXSpace3D(PxPhysics *p_physics, PxDefaultCpuDispatche
 	scene_desc.filterShader = godot_physx_filter_shader;
 	scene_desc.filterCallback = &g_filter_callback;
 	scene_desc.simulationEventCallback = &g_contact_callback;
+	scene_desc.contactModifyCallback = &g_force_limit_callback;
 	scene_desc.flags |= PxSceneFlag::eENABLE_ACTIVE_ACTORS;
 	// Areas are kinematic actors: these pairs reach the filter shader, so an area sees static and kinematic bodies.
 	scene_desc.staticKineFilteringMode = PxPairFilteringMode::eKEEP;

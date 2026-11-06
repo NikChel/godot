@@ -13,6 +13,23 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="body_get_contact_force_limit" qualifiers="static">
+			<return type="float" />
+			<param index="0" name="body" type="RID" />
+			<description>
+				Returns the contact force limit of [param body] set with [method body_set_contact_force_limit], [code]0.0[/code] for none.
+			</description>
+		</method>
+		<method name="body_set_contact_force_limit" qualifiers="static">
+			<return type="void" />
+			<param index="0" name="body" type="RID" />
+			<param index="1" name="newtons" type="float" />
+			<description>
+				Limits the force (in newtons) any contact of [param body] gives the other body of the pair: in a physics step the solver applies at most [param newtons] × step of impulse per pair of touching shapes, shared by its contact points (the lower limit when both bodies have one). [code]0.0[/code] removes the limit (the default).
+				Mainly for a kinematic body pushed into others, e.g. an item held in a hand: without a limit it pushes with infinite mass, with one at most with [param newtons], while a body resting on it stays as long as its weight is under the limit. The contact still resolves at that force only, so a body pushed harder than the limit can sink into the limited one.
+				[param body] is a body RID ([method CollisionObject3D.get_rid]); call it from the main thread, between physics steps.
+			</description>
+		</method>
 		<method name="get_gpu_device_name" qualifiers="static">
 			<return type="String" />
 			<description>

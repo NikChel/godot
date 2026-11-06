@@ -758,12 +758,14 @@ void GodotPhysXBody3D::set_ccd(bool p_enable) {
 
 PxFilterData GodotPhysXBody3D::_filter_data() const {
 	// word0/word1: Godot collision layer/mask. word2: flags read by the scene
-	// filter shader -- this body wants contact reports, or has collision
-	// exceptions (its pairs go to the filter callback). word3 marks a body.
+	// filter shader -- this body wants contact reports, has collision
+	// exceptions (its pairs go to the filter callback), or a contact force
+	// limit (its pairs go to contact modification). word3 marks a body.
 	PxFilterData fd;
 	fd.word0 = collision_layer;
 	fd.word1 = collision_mask;
-	fd.word2 = (reports_contacts() ? FILTER_REPORTS_CONTACTS : 0u) | (collision_exceptions.is_empty() ? 0u : FILTER_HAS_EXCEPTIONS);
+	fd.word2 = (reports_contacts() ? FILTER_REPORTS_CONTACTS : 0u) | (collision_exceptions.is_empty() ? 0u : FILTER_HAS_EXCEPTIONS) |
+			(contact_force_limit > 0.0 ? FILTER_LIMITS_CONTACT_FORCE : 0u);
 	fd.word3 = FILTER_BODY_MARKER;
 	return fd;
 }
@@ -937,6 +939,15 @@ void GodotPhysXBody3D::set_max_contacts_reported(int p_amount) {
 		// contact pairs are only re-filtered on touch changes -- rebuild so the
 		// new setting takes effect immediately.
 		_build_actor();
+	}
+}
+
+void GodotPhysXBody3D::set_contact_force_limit(real_t p_newtons) {
+	const bool was_limited = contact_force_limit > 0.0;
+	contact_force_limit = MAX(p_newtons, (real_t)0.0);
+	if (was_limited != (contact_force_limit > 0.0)) {
+		// The shader routes the pairs by word2: the same re-filter as an exception change (pairs already touching too).
+		_collision_exceptions_changed();
 	}
 }
 

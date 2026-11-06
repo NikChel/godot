@@ -32,6 +32,7 @@
 #include "physx_info.h"
 
 #include "godot_physx_server_3d.h"
+#include "objects/godot_physx_body_3d.h"
 
 #include "core/object/class_db.h"
 
@@ -45,7 +46,25 @@ String PhysX::get_gpu_device_name() {
 	return server != nullptr ? server->get_gpu_device_name() : String();
 }
 
+void PhysX::body_set_contact_force_limit(RID p_body, real_t p_newtons) {
+	GodotPhysXServer3D *server = GodotPhysXServer3D::get_singleton();
+	ERR_FAIL_NULL_MSG(server, "PhysX is not the active physics engine.");
+	GodotPhysXBody3D *body = server->get_body(p_body);
+	ERR_FAIL_NULL(body);
+	body->set_contact_force_limit(p_newtons);
+}
+
+real_t PhysX::body_get_contact_force_limit(RID p_body) {
+	const GodotPhysXServer3D *server = GodotPhysXServer3D::get_singleton();
+	ERR_FAIL_NULL_V_MSG(server, 0.0, "PhysX is not the active physics engine.");
+	const GodotPhysXBody3D *body = server->get_body(p_body);
+	ERR_FAIL_NULL_V(body, 0.0);
+	return body->get_contact_force_limit();
+}
+
 void PhysX::_bind_methods() {
 	ClassDB::bind_static_method("PhysX", D_METHOD("is_gpu_available"), &PhysX::is_gpu_available);
 	ClassDB::bind_static_method("PhysX", D_METHOD("get_gpu_device_name"), &PhysX::get_gpu_device_name);
+	ClassDB::bind_static_method("PhysX", D_METHOD("body_set_contact_force_limit", "body", "newtons"), &PhysX::body_set_contact_force_limit);
+	ClassDB::bind_static_method("PhysX", D_METHOD("body_get_contact_force_limit", "body"), &PhysX::body_get_contact_force_limit);
 }

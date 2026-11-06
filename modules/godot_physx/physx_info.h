@@ -34,7 +34,8 @@
 #include "core/object/object.h"
 
 // Script-side queries about the PhysX backend itself (not tied to any node):
-// PhysX.is_gpu_available(), PhysX.get_gpu_device_name().
+// PhysX.is_gpu_available(), PhysX.get_gpu_device_name(); and PhysX-only body
+// settings the PhysicsServer3D API has no place for (contact force limit).
 class PhysX : public Object {
 	GDCLASS(PhysX, Object);
 
@@ -44,4 +45,7 @@ protected:
 public:
 	static bool is_gpu_available();
 	static String get_gpu_device_name();
+
+	static void body_set_contact_force_limit(RID p_body, real_t p_newtons);
+	static real_t body_get_contact_force_limit(RID p_body);
 };

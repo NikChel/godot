@@ -76,6 +76,7 @@ public:
 	// PxFilterData word2 bits, read by the scene filter shader.
 	static constexpr uint32_t FILTER_REPORTS_CONTACTS = 1u << 0;
 	static constexpr uint32_t FILTER_HAS_EXCEPTIONS = 1u << 1;
+	static constexpr uint32_t FILTER_LIMITS_CONTACT_FORCE = 1u << 2;
 
 private:
 	RID self;
@@ -152,6 +153,10 @@ private:
 
 	int max_contacts_reported = 0;
 	LocalVector<Contact> contacts;
+
+	// PhysX.body_set_contact_force_limit(): the most force (N) a contact of this body gives the other body of the pair
+	// (0: no limit). Its pairs go through the scene's contact modification, which caps their impulse per step.
+	real_t contact_force_limit = 0.0;
 
 	HashSet<GodotPhysXJoint3D *> joints;
 
@@ -261,6 +266,9 @@ public:
 	void set_max_contacts_reported(int p_amount);
 	int get_max_contacts_reported() const { return max_contacts_reported; }
 	bool reports_contacts() const { return max_contacts_reported > 0; }
+
+	void set_contact_force_limit(real_t p_newtons);
+	real_t get_contact_force_limit() const { return contact_force_limit; }
 
 	// Called by the space's simulation event callback while contacts are being
 	// processed (inside fetchResults).
