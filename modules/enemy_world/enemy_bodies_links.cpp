@@ -111,6 +111,8 @@ void EnemyBodies::_link_move(int p_h, Body &r_b, CharacterBody3D *p_body, const 
 	Transform3D fx = p_fx;
 	Vector3 goal = has_goal ? sp.inv.xform(r_b.world) : Vector3();
 	Vector3 vel;
+	r_b.backoff = Vector3(); // Скорость тела ведёт связь, не уступка
+	_ghost_tick(p_h, r_b, p_body, false);
 	if (r_b.link_state == LINK_ON) {
 		on_link++;
 		const Vector3 from = EnemyLinks::at(r_b.motion, r_b.link_t);

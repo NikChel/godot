@@ -107,6 +107,7 @@ int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_vi
 	if (!spaces.is_empty() && spaces[0].crowd.is_valid()) {
 		_space_xforms();
 		b.crowd = spaces[0].crowd->agent_add(spaces[0].inv.xform(p_body->get_global_position()));
+		_set_backoff_agent(b);
 	}
 	return h;
 }
@@ -114,6 +115,10 @@ int EnemyBodies::body_add(CharacterBody3D *p_body, Area3D *p_item_zone, int p_vi
 void EnemyBodies::body_remove(int p_h) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	if (body != nullptr) {
+		_ghost_tick(p_h, b, body, false);
+	}
 	_link_release(p_h, b);
 	EnemyWorld *c = _crowd(b);
 	if (c != nullptr && b.crowd >= 0) {
@@ -131,6 +136,10 @@ void EnemyBodies::body_kill(int p_h) {
 	}
 	b.dead_stats = body_crowd_stats(p_h);
 	b.dead = true;
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	if (body != nullptr) {
+		_ghost_tick(p_h, b, body, false);
+	}
 	_link_release(p_h, b);
 	b.link_state = LINK_NONE;
 	b.link = -1;
@@ -162,6 +171,7 @@ void EnemyBodies::_set_space(int p_h, Body &r_b, int p_space, CharacterBody3D *p
 	const Vector3 pos = p_body->get_global_position();
 	if (sp.crowd.is_valid()) {
 		r_b.crowd = sp.crowd->agent_add(sp.inv.xform(pos));
+		_set_backoff_agent(r_b);
 	}
 	r_b.frame_last = _frame_xform(r_b);
 	// Опора подвижного пространства не добавляет телу свою скорость: перенос — _carry (как PlayerFrame.switch_to)
@@ -520,6 +530,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	tier_counts[TIER_FAR] = 0;
 	rest_count = 0;
 	_space_xforms();
+	_priority_to_spaces(); // До первого запроса толпы в тике (_links_tick спрашивает count_near)
 	_links_tick(p_delta);
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
@@ -567,6 +578,8 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	}
 	const Space &sp = spaces[r_b.space]; // Пространство на начало тика (правило пола меняет его после шага)
 	Vector3 want; // Мир
+	Vector3 backoff; // Уступка точкам приоритета (мир), не входит в want
+	bool ghost = false;
 	uint8_t st = EnemyWorld::AGENT_IDLE;
 	bool has_goal = false;
 	Vector3 goal; // Пространство тела
@@ -591,7 +604,10 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 			_emit(EVENT_PATH, p_h);
 		}
 		want = sp.xf.basis.xform(w);
+		backoff = sp.xf.basis.xform(c->agent_backoff(r_b.crowd));
+		ghost = c->agent_ghost(r_b.crowd);
 	}
+	_ghost_tick(p_h, r_b, p_body, ghost);
 	if (st == EnemyWorld::AGENT_LINK && has_goal) {
 		_link_wait(p_h, r_b, p_body, p_now, p_dt); // Ушёл на связь — двигается со следующего тика
 	} else if (r_b.link_state == LINK_WAIT) {
@@ -608,13 +624,14 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	_update_tier(r_b, pos0);
 	Vector3 vel;
 	if (r_b.tier == TIER_FAR) {
-		vel = _move_far(r_b, p_body, want, face, p_dt);
-	} else if (_rest(r_b, p_body, want, st, p_now)) {
+		vel = _move_far(r_b, p_body, want, backoff, face, p_dt);
+	} else if (_rest(r_b, p_body, want + backoff, st, p_now)) {
 		rest_count++;
+		r_b.backoff = Vector3();
 		_lag(r_b, 0.0f, p_dt);
 		_turn(r_b, p_body, face, r_b.up, p_dt);
 	} else {
-		_move_near(r_b, p_body, want, face, p_dt);
+		_move_near(r_b, p_body, want, backoff, face, p_dt);
 		if (_follow_floor(p_h, r_b, p_body, p_now)) { // Пространство сменилось: цель и система — нового
 			fx = r_b.frame_last;
 			goal = spaces[r_b.space].inv.xform(r_b.world);
@@ -625,7 +642,7 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 			_emit(EVENT_ITEMS, p_h);
 		}
 	}
-	r_b.want_speed = want.length();
+	r_b.want_speed = (want + backoff).length(); // Предметы у ног толкает и пятясь
 	r_b.state = st;
 	_publish(r_b, p_body, fx, vel, goal, has_goal, p_now);
 }
@@ -698,6 +715,122 @@ void EnemyBodies::_view_anim(const Body &p_b) {
 // Взгляд (мир, по верху тела): −Z торса.
 Vector3 EnemyBodies::_forward(const Body &p_b, const Transform3D &p_fx) {
 	return (p_fx.basis * Basis(UP_AXIS, p_b.yaw)).xform(Vector3(0.0f, 0.0f, -1.0f));
+}
+
+// --- Приоритет игроков ---
+
+void EnemyBodies::body_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Body &b = bodies[p_h];
+	b.bo_radius = p_radius;
+	b.bo_gap = p_gap;
+	b.bo_gain = p_gain;
+	b.bo_speed = p_speed;
+	_set_backoff_agent(b);
+}
+
+Vector3 EnemyBodies::body_backoff(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	return bodies[p_h].backoff;
+}
+
+bool EnemyBodies::body_ghost(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	return bodies[p_h].ghost;
+}
+
+// Точки тика — толпам всех пространств в их системе (касание — по позам: точка в чужом пространстве теснит так же).
+void EnemyBodies::_priority_to_spaces() {
+	const int n = prio_points.size();
+	prio_local.resize(n);
+	for (Space &s : spaces) {
+		if (!s.crowd.is_valid()) {
+			continue;
+		}
+		Vector4 *w = prio_local.ptrw();
+		for (int i = 0; i < n; i++) {
+			const Vector4 &p = prio_points[i];
+			const Vector3 q = s.inv.xform(Vector3(p.x, p.y, p.z));
+			w[i] = Vector4(q.x, q.y, q.z, p.w);
+		}
+		s.crowd->set_priority_points(prio_local);
+	}
+}
+
+// Числа уступки — агенту толпы тела (после agent_add: тело сменило пространство — агент новый).
+void EnemyBodies::_set_backoff_agent(const Body &p_b) {
+	EnemyWorld *c = _crowd(p_b);
+	if (c != nullptr && p_b.crowd >= 0) {
+		c->agent_set_backoff(p_b.crowd, p_b.bo_radius, p_b.bo_gap, p_b.bo_gain, p_b.bo_speed);
+	}
+}
+
+// Призрак: исключения пар с живыми телами ходоков ближе GHOST_R (новые — сразу), дальше GHOST_R + GHOST_HYST и пропавшие
+// (тело удалено или ручка занята другим) — сняты; не призрак — сняты все. Исключения — только свои (тело призрака).
+void EnemyBodies::_ghost_tick(int p_h, Body &r_b, CharacterBody3D *p_body, bool p_on) {
+	r_b.ghost = p_on;
+	if (!p_on && r_b.ghost_rid.is_empty()) {
+		return;
+	}
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	const RID self = p_body->get_rid();
+	const Vector3 pos = p_body->get_global_position();
+	const real_t keep2 = (GHOST_R + GHOST_HYST) * (GHOST_R + GHOST_HYST);
+	for (uint32_t i = 0; i < r_b.ghost_rid.size();) {
+		bool drop = !p_on;
+		if (!drop) {
+			const int o = r_b.ghost_h[i];
+			const Body *ob = (o >= 0 && o < (int)bodies.size()) ? &bodies[o] : nullptr;
+			Node3D *on = (ob != nullptr && ob->used && !ob->dead && ob->body_id == r_b.ghost_id[i]) ? Object::cast_to<Node3D>(ObjectDB::get_instance(ob->body_id)) : nullptr;
+			drop = on == nullptr || on->get_global_position().distance_squared_to(pos) > keep2;
+		}
+		if (drop) {
+			ps->body_remove_collision_exception(self, r_b.ghost_rid[i]);
+			r_b.ghost_h.remove_at_unordered(i);
+			r_b.ghost_id.remove_at_unordered(i);
+			r_b.ghost_rid.remove_at_unordered(i);
+		} else {
+			i++;
+		}
+	}
+	if (!p_on) {
+		return;
+	}
+	const real_t near2 = GHOST_R * GHOST_R;
+	for (uint32_t h = 0; h < bodies.size(); h++) {
+		const Body &ob = bodies[h];
+		if ((int)h == p_h || !ob.used || ob.dead || r_b.ghost_h.find((int)h) >= 0) {
+			continue;
+		}
+		CharacterBody3D *other = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(ob.body_id));
+		if (other == nullptr || !other->is_inside_tree() || other->get_global_position().distance_squared_to(pos) > near2) {
+			continue;
+		}
+		ps->body_add_collision_exception(self, other->get_rid());
+		r_b.ghost_h.push_back((int)h);
+		r_b.ghost_id.push_back(ob.body_id);
+		r_b.ghost_rid.push_back(other->get_rid());
+	}
+}
+
+// Шаг скорости тела (горизонталь, мир): своя скорость — скорость тела без уступки прошлого тика (уступку упёрли — к
+// точке своя не едет), к желаемой с разгоном ACCEL; ход к точкам приоритета снят сразу (без разгона); плюс уступка этого
+// тика без разгона.
+Vector3 EnemyBodies::_own_step(Body &r_b, const Vector3 &p_v_h, const Vector3 &p_want_h, const Vector3 &p_backoff_h, real_t p_dt) {
+	Vector3 own = _clip_against(p_v_h - r_b.backoff, r_b.backoff);
+	own = _clip_against(own.move_toward(p_want_h, ACCEL * p_dt), p_backoff_h);
+	r_b.backoff = p_backoff_h;
+	return own + p_backoff_h;
+}
+
+// Составляющая p_v против p_away снята (p_away — нуль: как есть).
+Vector3 EnemyBodies::_clip_against(const Vector3 &p_v, const Vector3 &p_away) {
+	const real_t l2 = p_away.length_squared();
+	if (l2 < 1e-8f) {
+		return p_v;
+	}
+	const real_t d = p_v.dot(p_away);
+	return d < 0.0f ? p_v - p_away * (d / l2) : p_v;
 }
 
 // --- Мозг (WalkerBrain) ---
@@ -857,14 +990,15 @@ bool EnemyBodies::_rest(const Body &p_b, CharacterBody3D *p_body, const Vector3 
 	return (p_now + (uint64_t)p_b.slot) % REST_CHECK_TICKS != 0;
 }
 
-// WalkerMover.tick: горизонтальная скорость к желаемой с разгоном ACCEL, гравитация вдоль верха тела,
-// move_and_slide; шаг на ступень с пола или в тик после принятого шага; взгляд.
-void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt) {
+// WalkerMover.tick: горизонтальная скорость к желаемой с разгоном ACCEL (плюс уступка — _own_step), гравитация вдоль
+// верха тела, move_and_slide; шаг на ступень с пола или в тик после принятого шага; взгляд.
+void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_backoff, const Vector3 &p_face, real_t p_dt) {
 	const Vector3 up = r_b.up;
 	const Vector3 v = p_body->get_velocity();
 	Vector3 v_up = up * v.dot(up);
 	const Vector3 want_h = p_want - up * p_want.dot(up);
-	const Vector3 v_h = (v - v_up).move_toward(want_h, ACCEL * p_dt);
+	const Vector3 backoff_h = p_backoff - up * p_backoff.dot(up);
+	const Vector3 v_h = _own_step(r_b, v - v_up, want_h, backoff_h, p_dt);
 	if (p_body->is_on_floor()) {
 		v_up = Vector3();
 	} else {
@@ -875,7 +1009,7 @@ void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &
 	p_body->move_and_slide();
 	real_t rise = 0.0f;
 	if (grounded || r_b.on_step) {
-		rise = _try_step(p_body, want_h * p_dt, up, p_body->get_collision_mask() & ~ITEM_LAYER);
+		rise = _try_step(p_body, (want_h + backoff_h) * p_dt, up, p_body->get_collision_mask() & ~ITEM_LAYER);
 	}
 	r_b.on_step = rise > 0.0f;
 	_lag(r_b, rise, p_dt);
@@ -883,11 +1017,11 @@ void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &
 }
 
 // FAR: без физики — шаг по сетке навигации (точка сетки по вертикали, EnemyWorld.column), тот же разгон и взгляд.
-Vector3 EnemyBodies::_move_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt) {
+Vector3 EnemyBodies::_move_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_backoff, const Vector3 &p_face, real_t p_dt) {
 	const Vector3 up = r_b.up;
 	const Vector3 v = p_body->get_velocity();
 	const Vector3 want_h = p_want - up * p_want.dot(up);
-	const Vector3 v_h = (v - up * v.dot(up)).move_toward(want_h, ACCEL * p_dt);
+	const Vector3 v_h = _own_step(r_b, v - up * v.dot(up), want_h, p_backoff - up * p_backoff.dot(up), p_dt);
 	const Vector3 next = p_body->get_global_position() + v_h * p_dt;
 	EnemyWorld *c = _crowd(r_b);
 	const Space &sp = spaces[r_b.space];
@@ -1141,6 +1275,10 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_arm_tilt", "handle", "side"), &EnemyBodies::body_arm_tilt);
 	ClassDB::bind_method(D_METHOD("set_wake_points", "points"), &EnemyBodies::set_wake_points);
 	ClassDB::bind_method(D_METHOD("body_wake_state", "handle"), &EnemyBodies::body_wake_state);
+	ClassDB::bind_method(D_METHOD("set_priority_points", "points"), &EnemyBodies::set_priority_points);
+	ClassDB::bind_method(D_METHOD("body_set_backoff", "handle", "radius", "gap", "gain", "speed"), &EnemyBodies::body_set_backoff);
+	ClassDB::bind_method(D_METHOD("body_backoff", "handle"), &EnemyBodies::body_backoff);
+	ClassDB::bind_method(D_METHOD("body_ghost", "handle"), &EnemyBodies::body_ghost);
 	ClassDB::bind_method(D_METHOD("body_tumble_spin", "handle"), &EnemyBodies::body_tumble_spin);
 	ClassDB::bind_method(D_METHOD("body_tilt", "handle"), &EnemyBodies::body_tilt);
 	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);

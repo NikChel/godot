@@ -29,6 +29,10 @@ void EnemyWorld::_grow(uint32_t p_size) {
 	airborne.resize(p_size);
 	link_done.resize(p_size);
 	follow.resize(p_size);
+	backoff_cfg.resize(p_size);
+	out_backoff.resize(p_size);
+	out_ghost.resize(p_size);
+	prev_ghost.resize(p_size);
 	out_vel.resize(p_size);
 	out_heading.resize(p_size);
 	out_rank.resize(p_size);
@@ -101,6 +105,10 @@ int EnemyWorld::agent_add(const Vector3 &p_local_pos) {
 	out_link[h] = -1;
 	prev_link[h] = -1;
 	follow[h] = Follow();
+	backoff_cfg[h] = Backoff();
+	out_backoff[h] = Vector3();
+	out_ghost[h] = 0;
+	prev_ghost[h] = 0;
 	out_vel[h] = Vector3();
 	out_heading[h] = Vector3();
 	out_rank[h] = prio[h];
@@ -123,7 +131,30 @@ void EnemyWorld::agent_remove(int p_h) {
 	follow[p_h] = Follow();
 	airborne[p_h] = 0;
 	link_done[p_h] = 0;
+	out_backoff[p_h] = Vector3();
+	out_ghost[p_h] = 0;
 	free_handles.push_back((uint32_t)p_h);
+}
+
+void EnemyWorld::agent_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Backoff &c = backoff_cfg[p_h];
+	c.radius = MAX(p_radius, (real_t)0.0f);
+	c.gap = MAX(p_gap, (real_t)0.0f);
+	c.gain = MAX(p_gain, (real_t)0.0f);
+	c.speed = MAX(p_speed, (real_t)0.0f);
+}
+
+Vector3 EnemyWorld::agent_backoff(int p_h) {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	_ensure_step();
+	return out_backoff[p_h];
+}
+
+bool EnemyWorld::agent_ghost(int p_h) {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	_ensure_step();
+	return out_ghost[p_h] != 0;
 }
 
 void EnemyWorld::agent_commit(int p_h, const Vector3 &p_local_pos, const Vector3 &p_goal, bool p_has_goal, real_t p_stop_dist, real_t p_speed) {
@@ -263,6 +294,7 @@ void EnemyWorld::_step() {
 		prev_yield[h] = out_yield[h];
 		prev_state[h] = out_state[h];
 		prev_link[h] = out_link[h];
+		prev_ghost[h] = out_ghost[h];
 	}
 	for (uint32_t h = 0; h < n; h++) {
 		if (alive[h]) {
@@ -281,6 +313,8 @@ void EnemyWorld::_step_agent(uint32_t p_h, uint64_t p_now, real_t p_dt) {
 		out_state[p_h] = AGENT_LINK;
 		out_wants[p_h] = 0;
 		out_link[p_h] = -1;
+		out_backoff[p_h] = Vector3();
+		out_ghost[p_h] = 0;
 		return;
 	}
 	if (link_done[p_h]) { // Приземлился: путь с конца связи; путь, спрошенный до связи (от её начала), — мимо
@@ -298,8 +332,13 @@ void EnemyWorld::_step_agent(uint32_t p_h, uint64_t p_now, real_t p_dt) {
 		path_pending[p_h] = 0;
 		_adopt_path(p_h, f);
 	}
-	if (!in.has_goal) {
-		out_vel[p_h] = Vector3();
+	_neighbors(p_h, in.pos); // И без цели: призраку нужны соседи
+	// Приоритет игроков — в любом состоянии: уступка (на сетке), призрак, свой ход к точкам снят
+	bool pressed = false;
+	out_backoff[p_h] = _keep_on_mesh(f, in.pos, _backoff(p_h, in.pos, pressed), p_dt);
+	out_ghost[p_h] = (pressed || (prev_ghost[p_h] && _overlaps(p_h, in.pos))) ? 1 : 0;
+	if (!in.has_goal) { // Без цели (замах, удар, оглушение) толпа не ведёт; перекрытые с призраком расходятся
+		out_vel[p_h] = _clip_toward(p_h, in.pos, _keep_on_mesh(f, in.pos, _ghost_apart(p_h, in.pos), p_dt));
 		out_heading[p_h] = Vector3();
 		out_state[p_h] = AGENT_IDLE;
 		out_wants[p_h] = 0;
@@ -307,13 +346,12 @@ void EnemyWorld::_step_agent(uint32_t p_h, uint64_t p_now, real_t p_dt) {
 		out_link[p_h] = -1;
 		return;
 	}
-	_neighbors(p_h, in.pos);
 	_yield_tick(p_h, f, in.pos, p_dt);
 	Vector3 w = _follow_tick(p_h, f, in, p_dt);
 	if (!column_index.is_empty() || nav_map.is_valid()) {
 		w = _onto_mesh(f, in.pos, w, in.speed, p_dt);
 	}
-	out_vel[p_h] = w;
+	out_vel[p_h] = _clip_toward(p_h, in.pos, w);
 	out_state[p_h] = (uint8_t)f.state;
 	out_wants[p_h] = _wants_path(f, in) ? 1 : 0;
 	out_link[p_h] = f.has_path ? _corner_link(f) : -1;
@@ -461,7 +499,7 @@ Vector3 EnemyWorld::_follow_tick(uint32_t p_h, Follow &r_f, const Input &p_in, r
 		out_heading[p_h] = Vector3();
 		r_f.state = AGENT_LINK;
 		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
-		return _overlap(pos);
+		return _overlap(pos) + _ghost_apart(p_h, pos);
 	}
 	// Конец пути (цель вне сетки) — дальше не пройти: стоим, как и в очереди за стоящим соседом
 	const bool at_end = (uint32_t)r_f.corner == n - 1 && to_corner <= CORNER_REACH;
@@ -469,7 +507,7 @@ Vector3 EnemyWorld::_follow_tick(uint32_t p_h, Follow &r_f, const Input &p_in, r
 		out_heading[p_h] = Vector3();
 		r_f.state = AGENT_HOLD;
 		_track_stuck(p_h, r_f, pos, 0.0f, p_dt);
-		return _overlap(pos);
+		return _overlap(pos) + _ghost_apart(p_h, pos);
 	}
 	out_heading[p_h] = dir;
 	const Vector3 sep = _separation(pos);
@@ -733,6 +771,108 @@ Vector3 EnemyWorld::_onto_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 
 	return (Vector3(c.x - p_pos.x, 0.0f, c.z - p_pos.z) / p_dt).limit_length(p_w.length());
 }
 
+// --- Приоритет игроков ---
+
+// Скорость уступки: каждая точка ближе касания + зазора (по высоте ±BACKOFF_H) — от неё min(gain · глубина, speed);
+// сумма — не длиннее speed. r_pressed — такая точка есть (и на её оси: направления нет — скорости нет).
+Vector3 EnemyWorld::_backoff(uint32_t p_h, const Vector3 &p_pos, bool &r_pressed) const {
+	r_pressed = false;
+	const Backoff &c = backoff_cfg[p_h];
+	Vector3 out;
+	for (int i = 0; i < prio_points.size(); i++) {
+		const Vector4 &p = prio_points[i];
+		if (Math::abs(p.y - p_pos.y) > BACKOFF_H) {
+			continue;
+		}
+		const real_t r = c.radius + p.w + c.gap;
+		const real_t dx = p_pos.x - p.x;
+		const real_t dz = p_pos.z - p.z;
+		const real_t l2 = dx * dx + dz * dz;
+		if (l2 >= r * r) {
+			continue;
+		}
+		r_pressed = true;
+		const real_t l = Math::sqrt(l2);
+		if (l < 1e-4f) {
+			continue;
+		}
+		out += Vector3(dx, 0.0f, dz) * (MIN(c.gain * (r - l), c.speed) / l);
+	}
+	return out.limit_length(c.speed);
+}
+
+// Свой ход агента к точкам, которые его теснят (ближе касания + зазора), снят: игрок главнее.
+Vector3 EnemyWorld::_clip_toward(uint32_t p_h, const Vector3 &p_pos, const Vector3 &p_w) const {
+	const Backoff &c = backoff_cfg[p_h];
+	Vector3 w = p_w;
+	for (int i = 0; i < prio_points.size(); i++) {
+		const Vector4 &p = prio_points[i];
+		if (Math::abs(p.y - p_pos.y) > BACKOFF_H) {
+			continue;
+		}
+		const real_t r = c.radius + p.w + c.gap;
+		const Vector3 d(p.x - p_pos.x, 0.0f, p.z - p_pos.z);
+		const real_t l2 = d.length_squared();
+		if (l2 >= r * r || l2 < 1e-8f) {
+			continue;
+		}
+		const real_t toward = w.dot(d);
+		if (toward > 0.0f) {
+			w -= d * (toward / l2);
+		}
+	}
+	return w;
+}
+
+// Перекрыт с соседом (ближе суммы радиусов касания, по высоте ±BACKOFF_H; соседи — _neighbors).
+bool EnemyWorld::_overlaps(uint32_t p_h, const Vector3 &p_pos) const {
+	for (const uint32_t j : nb) {
+		const Vector3 &q = start_pos[j];
+		const real_t r = backoff_cfg[p_h].radius + backoff_cfg[j].radius;
+		if (Math::abs(q.y - p_pos.y) <= BACKOFF_H && _flat(q - p_pos).length_squared() < r * r) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Перекрытые с призраком (прошлого расчёта: агент или сосед) расходятся — как разведение, у касания до 0. В обычной
+// толпе соседей ближе касания нет (их держат тела), поведение без уступок прежнее.
+Vector3 EnemyWorld::_ghost_apart(uint32_t p_h, const Vector3 &p_pos) const {
+	Vector3 out;
+	for (const uint32_t j : nb) {
+		if (!prev_ghost[p_h] && !prev_ghost[j]) {
+			continue;
+		}
+		const Vector3 &q = start_pos[j];
+		if (Math::abs(q.y - p_pos.y) > BACKOFF_H) {
+			continue;
+		}
+		const real_t r = backoff_cfg[p_h].radius + backoff_cfg[j].radius;
+		const Vector3 d = _flat(p_pos - q);
+		const real_t l = d.length();
+		if (l < 1e-4f || l >= r) {
+			continue;
+		}
+		out += d / l * SEPARATION_GAIN * (1.0f - l / r);
+	}
+	return out;
+}
+
+// Скорость не уводит с сетки (как шаг _onto_mesh): шаг за край — к ближайшей точке края, не быстрее. Сетки нет — как есть.
+Vector3 EnemyWorld::_keep_on_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 &p_v, real_t p_dt) {
+	if (p_v.length_squared() < 1e-8f || (column_index.is_empty() && !nav_map.is_valid())) {
+		return p_v;
+	}
+	const Vector3 next = p_pos + p_v * p_dt;
+	const Vector3 c = column(next, r_f.hint);
+	r_f.hint = column_poly;
+	if (Vector2(c.x - next.x, c.z - next.z).length() <= MESH_EPS) {
+		return p_v;
+	}
+	return (Vector3(c.x - p_pos.x, 0.0f, c.z - p_pos.z) / p_dt).limit_length(p_v.length());
+}
+
 void EnemyWorld::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_navigation", "mesh", "map"), &EnemyWorld::set_navigation);
 	ClassDB::bind_method(D_METHOD("column", "local", "hint"), &EnemyWorld::column);
@@ -755,6 +895,10 @@ void EnemyWorld::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("agent_stuck_total", "handle"), &EnemyWorld::agent_stuck_total);
 	ClassDB::bind_method(D_METHOD("agent_blocked_total", "handle"), &EnemyWorld::agent_blocked_total);
 	ClassDB::bind_method(D_METHOD("agent_yield_total", "handle"), &EnemyWorld::agent_yield_total);
+	ClassDB::bind_method(D_METHOD("set_priority_points", "points"), &EnemyWorld::set_priority_points);
+	ClassDB::bind_method(D_METHOD("agent_set_backoff", "handle", "radius", "gap", "gain", "speed"), &EnemyWorld::agent_set_backoff);
+	ClassDB::bind_method(D_METHOD("agent_backoff", "handle"), &EnemyWorld::agent_backoff);
+	ClassDB::bind_method(D_METHOD("agent_ghost", "handle"), &EnemyWorld::agent_ghost);
 	ClassDB::bind_method(D_METHOD("get_agent_count"), &EnemyWorld::get_agent_count);
 	ClassDB::bind_method(D_METHOD("get_last_step_usec"), &EnemyWorld::get_last_step_usec);
 

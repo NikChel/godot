@@ -48,6 +48,12 @@ class Node3D;
 // (EnemyArms: неваляшки на плечах, хит-тела по кадрам костей EnemyRig) — шаг в начале тика, поза в конце.
 // Сон хит-форм (EnemyWake, spec §5): поза хит-тел торса и рук — только у бодрствующих (точка интереса set_wake_points
 // рядом или неваляшка не в покое), у спящих формы выключены.
+// Приоритет игроков (AGENTS §3.8; EnemyWorld — правило): точки set_priority_points (мир; ноги игроков тика — хост
+// считает по всем одинаково) в начале тика уходят толпам пространств в их системе; числа уступки тела —
+// body_set_backoff. Скорость тела — своя (к желаемой с разгоном ACCEL; ход к точкам снят сразу) плюс уступка толпы
+// без разгона (зазор не качается); своя — скорость тела без уступки прошлого тика. Взгляд — по своей скорости (пятится
+// лицом к цели). Призрак толпы — исключения пар с телами ходоков ближе GHOST_R (свои; проверка пары — в обе стороны,
+// свип соседа его тоже не видит): уступающий не упирается в соседей, снимаются за GHOST_R + GHOST_HYST и после призрака.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -116,6 +122,9 @@ public:
 	static constexpr real_t FLOOR_RAY_UP = 0.3f; // Начало луча над ногами
 	static constexpr real_t FLOOR_RAY_DOWN = 0.5f; // Конец луча под ногами (длиннее прилипания 0.35)
 	static constexpr uint32_t FLOOR_LAYER = 1;
+	// Приоритет игроков: призрак не упирается в ходоков ближе этого; исключение снимается дальше GHOST_R + GHOST_HYST
+	static constexpr real_t GHOST_R = 1.0f;
+	static constexpr real_t GHOST_HYST = 0.3f;
 
 private:
 	enum LinkState {
@@ -199,6 +208,16 @@ private:
 		EnemyAnim anim;
 		EnemyArms arms;
 		EnemyWake wake;
+		// Приоритет игроков
+		real_t bo_radius = 0.32f; // Числа уступки (body_set_backoff; EnemyWorld::Backoff)
+		real_t bo_gap = 0.1f;
+		real_t bo_gain = 30.0f;
+		real_t bo_speed = 3.0f;
+		Vector3 backoff; // Уступка в скорости тела прошлого тика (мир, горизонталь)
+		bool ghost = false;
+		LocalVector<int> ghost_h; // Исключения пар призрака: ручка тела ходока …
+		LocalVector<ObjectID> ghost_id; // … его тело …
+		LocalVector<RID> ghost_rid; // … и RID (снимается и после удаления тела)
 	};
 
 	LocalVector<Body> bodies;
@@ -215,6 +234,8 @@ private:
 	LocalVector<ObjectID> players_id;
 	PackedInt32Array events;
 	PackedVector4Array wake_points; // Точки интереса тика (сон хит-форм): центр (мир) и радиус
+	PackedVector4Array prio_points; // Точки приоритета (мир): ноги игроков, w — радиус касания
+	PackedVector4Array prio_local; // Они же в системе пространства (раздача толпам)
 	uint64_t last_tick_usec = 0;
 	int tier_counts[2] = {};
 	int rest_count = 0;
@@ -246,6 +267,12 @@ private:
 	Transform3D _avatar_xf(const Body &p_b, CharacterBody3D *p_body) const;
 	void _view_anim(const Body &p_b);
 	bool _wake(Body &r_b, CharacterBody3D *p_body, real_t p_dt);
+	// Приоритет игроков
+	void _priority_to_spaces();
+	void _set_backoff_agent(const Body &p_b);
+	void _ghost_tick(int p_h, Body &r_b, CharacterBody3D *p_body, bool p_on);
+	Vector3 _own_step(Body &r_b, const Vector3 &p_v_h, const Vector3 &p_want_h, const Vector3 &p_backoff_h, real_t p_dt);
+	static Vector3 _clip_against(const Vector3 &p_v, const Vector3 &p_away);
 	// Мозг
 	int _player_index(ObjectID p_id) const;
 	bool _player_alive(int p_i) const;
@@ -256,8 +283,8 @@ private:
 	// Движение
 	void _update_tier(Body &r_b, const Vector3 &p_pos);
 	static bool _rest(const Body &p_b, CharacterBody3D *p_body, const Vector3 &p_want, uint8_t p_state, uint64_t p_now);
-	void _move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt);
-	Vector3 _move_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_face, real_t p_dt);
+	void _move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_backoff, const Vector3 &p_face, real_t p_dt);
+	Vector3 _move_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_want, const Vector3 &p_backoff, const Vector3 &p_face, real_t p_dt);
 	static void _lag(Body &r_b, real_t p_rise, real_t p_dt);
 	static void _turn(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_face, const Vector3 &p_up, real_t p_dt);
 	static real_t _damp(real_t p_curr, real_t p_target, real_t p_halflife, real_t p_dt);
@@ -344,6 +371,13 @@ public:
 	// Сон хит-форм: точки интереса тика (xyz — центр, мир; w — радиус) и состояние тела (EnemyWake::State, пробы)
 	void set_wake_points(const PackedVector4Array &p_points) { wake_points = p_points; }
 	int body_wake_state(int p_h) const;
+	// Приоритет игроков: точки (xyz — ноги, мир; w — радиус касания точки) — с ближайшего тика и дальше, пока не заменят;
+	// числа уступки тела (радиус касания, зазор, скорость на метр глубины, предел — не быстрее шага); уступка в скорости
+	// тела последнего тика (мир) и призрак (пробы)
+	void set_priority_points(const PackedVector4Array &p_points) { prio_points = p_points; }
+	void body_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
+	Vector3 body_backoff(int p_h) const;
+	bool body_ghost(int p_h) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);

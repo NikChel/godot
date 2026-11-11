@@ -14,6 +14,14 @@
 // раньше этого тика) и намерения соседей прошлого расчёта, каждый агент пишет только своё — порядок нод
 // и кто спросил первым не влияют (AGENTS §2.5). Новый путь (agent_set_path) — со следующего тика.
 // Порт PathFollower / CrowdGrid / CrowdAgent / CrowdYield / NavColumnIndex (GDScript, 2026-10-21).
+// Приоритет игроков (AGENTS §3.8, решение пользователя 2026-11-11): точки приоритета расчёта (set_priority_points —
+// ноги игроков в системе толпы, w — радиус касания точки) в тело агента не входят. Ближе касания + зазора (радиус
+// агента + радиус точки + gap) агент получает скорость уступки от точки min(gain · глубина, speed) (сумма — не длиннее
+// speed; на сетке — как шаг), его собственный ход к точке снимается — в любом состоянии, и без цели (замах, удар:
+// мозг не трогается). Уступающий — призрак (agent_ghost): тело не упирается в соседей (EnemyBodies), призрак остаётся,
+// пока перекрыт с соседом (ближе суммы радиусов), перекрытые с призраком расходятся (как разведение, и без цели).
+// Числа агента — agent_set_backoff; скорость уступки — отдельно от желаемой (agent_backoff): тело кладёт её без
+// разгона, иначе зазор качается «стоп-пошёл».
 class EnemyWorld : public RefCounted {
 	GDCLASS(EnemyWorld, RefCounted);
 
@@ -66,6 +74,8 @@ public:
 	static constexpr real_t OFF_MESH_DIRECT = 1.5f;
 	static constexpr real_t MESH_EPS = 0.05f;
 	static constexpr real_t COLUMN_H = 0.5f;
+	// Приоритет игроков: по высоте дальше — точка не касается (этаж выше / ниже)
+	static constexpr real_t BACKOFF_H = 0.9f;
 
 private:
 	struct Input { // Вход агента, сданный в тике in_tick
@@ -96,6 +106,12 @@ private:
 		real_t hold_free_t = 0.0f; // Сколько подряд свободно (выход из HOLD)
 		int hint = -1; // Полигон прошлого ответа индекса
 	};
+	struct Backoff { // Числа уступки агента (agent_set_backoff)
+		real_t radius = 0.32f; // Радиус касания агента (сфера ног), м
+		real_t gap = 0.1f; // Зазор: ближе касания + зазора — уступает, м
+		real_t gain = 30.0f; // Скорость уступки на метр глубины, 1/с
+		real_t speed = 3.0f; // Предел скорости уступки (не быстрее своего шага), м/с
+	};
 
 	// Агенты (индекс — ручка)
 	LocalVector<uint8_t> alive;
@@ -111,6 +127,7 @@ private:
 	LocalVector<uint8_t> airborne; // На связи (тело ведёт EnemyBodies): соседи его не видят, расчёта нет
 	LocalVector<uint8_t> link_done; // Связь пройдена — со следующего расчёта путь с конца связи
 	LocalVector<Follow> follow;
+	LocalVector<Backoff> backoff_cfg;
 	// Выходы расчёта
 	LocalVector<Vector3> out_vel;
 	LocalVector<Vector3> out_heading;
@@ -122,6 +139,8 @@ private:
 	LocalVector<int> stuck_total;
 	LocalVector<int> blocked_total;
 	LocalVector<int> yield_total;
+	LocalVector<Vector3> out_backoff; // Скорость уступки точкам приоритета (локальная, XZ), не входит в out_vel
+	LocalVector<uint8_t> out_ghost; // Уступает или перекрыт с соседом после уступки
 	// Снимок расчёта: позы на начало тика и намерения прошлого расчёта
 	LocalVector<Vector3> start_pos;
 	LocalVector<Vector3> prev_heading;
@@ -130,6 +149,8 @@ private:
 	LocalVector<Input> start_in; // Входы на начало тика (цель, остановка — для очереди)
 	LocalVector<uint8_t> prev_state;
 	LocalVector<int> prev_link;
+	LocalVector<uint8_t> prev_ghost;
+	PackedVector4Array prio_points; // Точки приоритета: xyz — ноги (локальные), w — радиус касания точки
 	LocalVector<uint32_t> free_handles;
 	int64_t next_prio = 0;
 	uint64_t stepped_tick = UINT64_MAX;
@@ -167,6 +188,12 @@ private:
 	bool _wants_path(const Follow &p_f, const Input &p_in) const;
 	void _track_stuck(uint32_t p_h, Follow &r_f, const Vector3 &p_pos, real_t p_want_speed, real_t p_dt);
 	Vector3 _onto_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 &p_w, real_t p_speed, real_t p_dt);
+	// Приоритет игроков
+	Vector3 _backoff(uint32_t p_h, const Vector3 &p_pos, bool &r_pressed) const;
+	Vector3 _clip_toward(uint32_t p_h, const Vector3 &p_pos, const Vector3 &p_w) const;
+	bool _overlaps(uint32_t p_h, const Vector3 &p_pos) const;
+	Vector3 _ghost_apart(uint32_t p_h, const Vector3 &p_pos) const;
+	Vector3 _keep_on_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 &p_v, real_t p_dt);
 
 protected:
 	static void _bind_methods();
@@ -200,6 +227,13 @@ public:
 	void agent_link_done(int p_h); // Связь пройдена: путь — с её конца (со следующего расчёта)
 	// Агентов не на связи ближе p_r по горизонтали (по высоте ±NEAR_H) к локальной точке; позы на начало тика
 	int count_near(const Vector3 &p_local, real_t p_r, int p_exclude);
+	// Приоритет игроков: точки (xyz — ноги, локальные; w — радиус касания точки) — для ближайшего расчёта и дальше, пока
+	// не заменят (EnemyBodies ставит их в начале своего тика, до первого запроса); числа уступки агента; скорость уступки
+	// (локальная, XZ; не входит в agent_velocity); призрак (уступает или перекрыт с соседом после уступки)
+	void set_priority_points(const PackedVector4Array &p_points) { prio_points = p_points; }
+	void agent_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
+	Vector3 agent_backoff(int p_h);
+	bool agent_ghost(int p_h);
 	int get_agent_count() const;
 	int64_t get_last_step_usec() const { return (int64_t)last_step_usec; }
 };
