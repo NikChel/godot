@@ -1,5 +1,6 @@
 #pragma once
 
+#include "enemy_backoff.h"
 #include "nav_column_index.h"
 
 #include "core/object/ref_counted.h"
@@ -22,7 +23,7 @@
 // призрак остаётся, пока перекрыт с соседом (ближе суммы радиусов), перекрытые с призраком расходятся (как разведение, не
 // медленнее GHOST_APART_MIN, и без цели).
 // Числа агента — agent_set_backoff; скорость уступки — отдельно от желаемой (agent_backoff): тело кладёт её без
-// разгона, иначе зазор качается «стоп-пошёл».
+// разгона, иначе зазор качается «стоп-пошёл». Правило — EnemyBackoff (то же у копий клиента, EnemyReplicas).
 class EnemyWorld : public RefCounted {
 	GDCLASS(EnemyWorld, RefCounted);
 
@@ -76,9 +77,9 @@ public:
 	static constexpr real_t MESH_EPS = 0.05f;
 	static constexpr real_t COLUMN_H = 0.5f;
 	// Приоритет игроков: по высоте дальше — точка не касается (этаж выше / ниже)
-	static constexpr real_t BACKOFF_H = 0.9f;
+	static constexpr real_t BACKOFF_H = EnemyBackoff::H;
 	// Глубже — теснит (призрак); мельче скорость уступки ниже покоя тела (EnemyBodies::REST_SPEED): тело встаёт у края
-	static constexpr real_t PRESS_EPS = 0.005f;
+	static constexpr real_t PRESS_EPS = EnemyBackoff::PRESS_EPS;
 	// Перекрытые с призраком расходятся не медленнее (разведение у касания — ниже покоя тела: стояли бы в соседе)
 	static constexpr real_t GHOST_APART_MIN = 0.3f;
 
@@ -111,12 +112,7 @@ private:
 		real_t hold_free_t = 0.0f; // Сколько подряд свободно (выход из HOLD)
 		int hint = -1; // Полигон прошлого ответа индекса
 	};
-	struct Backoff { // Числа уступки агента (agent_set_backoff)
-		real_t radius = 0.32f; // Радиус касания агента (сфера ног), м
-		real_t gap = 0.1f; // Зазор: ближе касания + зазора — уступает, м
-		real_t gain = 30.0f; // Скорость уступки на метр глубины, 1/с
-		real_t speed = 3.0f; // Предел скорости уступки (не быстрее своего шага), м/с
-	};
+	using Backoff = EnemyBackoff; // Числа уступки агента (agent_set_backoff)
 
 	// Агенты (индекс — ручка)
 	LocalVector<uint8_t> alive;

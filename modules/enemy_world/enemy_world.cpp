@@ -776,52 +776,12 @@ Vector3 EnemyWorld::_onto_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 
 // Скорость уступки: каждая точка ближе касания + зазора (по высоте ±BACKOFF_H) — от неё min(gain · глубина, speed);
 // сумма — не длиннее speed. r_pressed — точка глубже PRESS_EPS (и на её оси: направления нет — скорости нет).
 Vector3 EnemyWorld::_backoff(uint32_t p_h, const Vector3 &p_pos, bool &r_pressed) const {
-	r_pressed = false;
-	const Backoff &c = backoff_cfg[p_h];
-	Vector3 out;
-	for (int i = 0; i < prio_points.size(); i++) {
-		const Vector4 &p = prio_points[i];
-		if (Math::abs(p.y - p_pos.y) > BACKOFF_H) {
-			continue;
-		}
-		const real_t r = c.radius + p.w + c.gap;
-		const real_t dx = p_pos.x - p.x;
-		const real_t dz = p_pos.z - p.z;
-		const real_t l2 = dx * dx + dz * dz;
-		if (l2 >= r * r) {
-			continue;
-		}
-		const real_t l = Math::sqrt(l2);
-		r_pressed = r_pressed || r - l > PRESS_EPS;
-		if (l < 1e-4f) {
-			continue;
-		}
-		out += Vector3(dx, 0.0f, dz) * (MIN(c.gain * (r - l), c.speed) / l);
-	}
-	return out.limit_length(c.speed);
+	return backoff_cfg[p_h].velocity(p_pos, prio_points, r_pressed);
 }
 
 // Свой ход агента к точкам, которые его теснят (ближе касания + зазора), снят: игрок главнее.
 Vector3 EnemyWorld::_clip_toward(uint32_t p_h, const Vector3 &p_pos, const Vector3 &p_w) const {
-	const Backoff &c = backoff_cfg[p_h];
-	Vector3 w = p_w;
-	for (int i = 0; i < prio_points.size(); i++) {
-		const Vector4 &p = prio_points[i];
-		if (Math::abs(p.y - p_pos.y) > BACKOFF_H) {
-			continue;
-		}
-		const real_t r = c.radius + p.w + c.gap;
-		const Vector3 d(p.x - p_pos.x, 0.0f, p.z - p_pos.z);
-		const real_t l2 = d.length_squared();
-		if (l2 >= r * r || l2 < 1e-8f) {
-			continue;
-		}
-		const real_t toward = w.dot(d);
-		if (toward > 0.0f) {
-			w -= d * (toward / l2);
-		}
-	}
-	return w;
+	return backoff_cfg[p_h].clip_toward(p_pos, p_w, prio_points);
 }
 
 // Перекрыт с соседом (ближе суммы радиусов касания, по высоте ±BACKOFF_H; соседи — _neighbors).

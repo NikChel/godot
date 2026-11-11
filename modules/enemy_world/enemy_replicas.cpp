@@ -52,15 +52,22 @@ void EnemyReplicas::_space_xforms() {
 			Node3D *n = Object::cast_to<Node3D>(o);
 			s.xf = n ? n->get_global_transform() : Transform3D();
 		}
+		s.inv = s.xf.affine_inverse();
 	}
+}
+
+// Пространство; номер вне реестра — корабль (0), реестра нет — nullptr (мир).
+const EnemyReplicas::Space *EnemyReplicas::_space(int p_space) const {
+	if (spaces.is_empty()) {
+		return nullptr;
+	}
+	return &spaces[p_space >= 0 && p_space < (int)spaces.size() ? p_space : 0];
 }
 
 // Поза пространства; номер вне реестра — корабль (0), реестра нет — мир.
 Transform3D EnemyReplicas::_space_xf(int p_space) const {
-	if (spaces.is_empty()) {
-		return Transform3D();
-	}
-	return spaces[p_space >= 0 && p_space < (int)spaces.size() ? p_space : 0].xf;
+	const Space *s = _space(p_space);
+	return s ? s->xf : Transform3D();
 }
 
 int EnemyReplicas::replica_add(Node3D *p_body, int p_view, int p_net_id) {
@@ -283,8 +290,9 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		Node3D *body = r.body_id.is_valid() ? Object::cast_to<Node3D>(ObjectDB::get_instance(r.body_id)) : nullptr;
 		const bool sampled = body != nullptr && _sample(r, r.t_local, p_seek);
 		const Transform3D xf = _space_xf(r.space);
-		const Vector3 world = r.cross ? _space_xf(r.space_a).xform(r.pos_a).lerp(_space_xf(r.space_b).xform(r.pos_b), r.cross_f) : xf.xform(r.pos);
+		Vector3 world = r.cross ? _space_xf(r.space_a).xform(r.pos_a).lerp(_space_xf(r.space_b).xform(r.pos_b), r.cross_f) : xf.xform(r.pos);
 		if (sampled) {
+			world += _yield(r, world, dt); // Поза копии — снимок плюс местная уступка своему игроку
 			body->set_global_position(world);
 		}
 		if (sampled && views.is_valid() && r.view >= 0) {
@@ -292,7 +300,7 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			if (r.cross) {
 				views->view_commit(r.view, Transform3D(xf.basis * yaw, world), r.step_lag, -1);
 			} else {
-				views->view_commit(r.view, Transform3D(yaw, r.pos), r.step_lag, r.space);
+				views->view_commit(r.view, Transform3D(yaw, r.pos + r.bo_off), r.step_lag, r.space);
 			}
 			const Quaternion tilt[EnemyRig::ARMS] = { r.arms.tilt(0), r.arms.tilt(1) };
 			views->view_anim(r.view, r.anim, tilt);
@@ -315,6 +323,52 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 	}
 	last_tick_usec = OS::get_singleton()->get_ticks_usec() - t0;
 	return due_handles;
+}
+
+// Местная уступка своему игроку (заголовок): добавка этого тика (мир) к позе снимка p_world. Расчёт — в системе
+// пространства копии (как толпа хоста — в системе своего пространства), горизонталь — её XZ.
+Vector3 EnemyReplicas::_yield(Replica &r_r, const Vector3 &p_world, real_t p_dt) {
+	const Space *sp = _space(r_r.space);
+	const Transform3D inv = sp ? sp->inv : Transform3D();
+	const Vector3 base = inv.xform(p_world); // Снимок в системе пространства копии
+	if (r_r.bo_space != r_r.space) { // Пространство сменилось: добавка — через мир в горизонталь нового; шага снимка нет
+		if (r_r.bo_space >= 0) {
+			r_r.bo_off = inv.basis.xform(_space_xf(r_r.bo_space).basis.xform(r_r.bo_off));
+			r_r.bo_off.y = 0.0f;
+		}
+		r_r.bo_prev = base;
+		r_r.bo_space = r_r.space;
+	}
+	const Vector3 prev = r_r.bo_prev;
+	r_r.bo_prev = base;
+	Vector3 step = base - prev;
+	step.y = 0.0f;
+	const int n = prio_points.size();
+	if (step.length_squared() > YIELD_JUMP * YIELD_JUMP || (n == 0 && r_r.bo_off.is_zero_approx())) {
+		r_r.bo_off = Vector3(); // Скачок снимка — добавка снята; нет ни точек, ни добавки — копия в позе снимка
+		return Vector3();
+	}
+	prio_local.resize(n);
+	Vector4 *pl = prio_local.ptrw();
+	for (int i = 0; i < n; i++) {
+		const Vector4 &p = prio_points[i];
+		const Vector3 q = inv.xform(Vector3(p.x, p.y, p.z));
+		pl[i] = Vector4(q.x, q.y, q.z, p.w);
+	}
+	const Vector3 c = prev + r_r.bo_off; // Копия на начало тика
+	Vector3 own = step; // Свой шаг копии — шаг снимка …
+	const real_t ol = r_r.bo_off.length();
+	if (ol > 1e-6f) { // … без догона (ход снимка к копии по добавке — съедает её) и со сходом остатка сверх догона
+		const Vector3 oh = r_r.bo_off / ol;
+		const real_t caught = CLAMP(step.dot(oh), (real_t)0.0f, ol);
+		const real_t relax = MIN(ol * MIN(p_dt / YIELD_RELAX_S, (real_t)1.0f), r_r.bo.speed * p_dt);
+		own -= oh * (caught + CLAMP(relax - caught, (real_t)0.0f, ol - caught));
+	}
+	bool pressed = false;
+	const Vector3 next = c + r_r.bo.clip_toward(c, own, prio_local) + r_r.bo.velocity(c, prio_local, pressed) * p_dt;
+	r_r.bo_off = next - base;
+	r_r.bo_off.y = 0.0f;
+	return (sp ? sp->xf.basis : Basis()).xform(r_r.bo_off);
 }
 
 // Основание неваляшки (мир): базис системы копии (подвижная — её поза, корабль — мир, как у тела хоста) в точке тела.
@@ -435,6 +489,20 @@ void EnemyReplicas::replica_set_ragdoll(int p_h, bool p_on) {
 	reps[p_h].ragdoll = p_on;
 }
 
+void EnemyReplicas::replica_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed) {
+	ERR_FAIL_COND(!_valid(p_h));
+	EnemyBackoff &c = reps[p_h].bo;
+	c.radius = MAX(p_radius, (real_t)0.0f);
+	c.gap = MAX(p_gap, (real_t)0.0f);
+	c.gain = MAX(p_gain, (real_t)0.0f);
+	c.speed = MAX(p_speed, (real_t)0.0f);
+}
+
+Vector3 EnemyReplicas::replica_backoff(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3());
+	return reps[p_h].bo_off;
+}
+
 int EnemyReplicas::get_replica_count() const {
 	return (int)(reps.size() - free_handles.size());
 }
@@ -476,6 +544,9 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("replica_arm_tilt", "handle", "side"), &EnemyReplicas::replica_arm_tilt);
 	ClassDB::bind_method(D_METHOD("set_wake_points", "points"), &EnemyReplicas::set_wake_points);
 	ClassDB::bind_method(D_METHOD("replica_wake_state", "handle"), &EnemyReplicas::replica_wake_state);
+	ClassDB::bind_method(D_METHOD("set_priority_points", "points"), &EnemyReplicas::set_priority_points);
+	ClassDB::bind_method(D_METHOD("replica_set_backoff", "handle", "radius", "gap", "gain", "speed"), &EnemyReplicas::replica_set_backoff);
+	ClassDB::bind_method(D_METHOD("replica_backoff", "handle"), &EnemyReplicas::replica_backoff);
 	ClassDB::bind_method(D_METHOD("get_due_clips"), &EnemyReplicas::get_due_clips);
 	ClassDB::bind_method(D_METHOD("get_replica_count"), &EnemyReplicas::get_replica_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyReplicas::get_last_tick_usec);

@@ -2,6 +2,7 @@
 
 #include "enemy_anim.h"
 #include "enemy_arms.h"
+#include "enemy_backoff.h"
 #include "enemy_rig.h"
 #include "enemy_tumbler.h"
 #include "enemy_views.h"
@@ -32,12 +33,25 @@ class Node3D;
 // Анимация и руки (spec 2026-10-27-walker-arms-design): как у тел хоста (EnemyBodies) — часы анимации по скорости
 // снимка, разовый клип — replica_play (GDScript по событию хоста), качание рук каждый пир считает сам. Сон хит-форм
 // (EnemyWake) — как у тел хоста, по своим точкам интереса.
+// Приоритет своего игрока (AGENTS §3.8: каждый считает свою сторону у себя): копия уступает игроку этого пира
+// (set_priority_points — ноги на этот тик, мир; чужих игроков знает хост) тем же правилом и числами, что тело хоста
+// (EnemyBackoff, replica_set_backoff), поверх позы снимка: поза копии — снимок плюс местная добавка (система
+// пространства, горизонталь; replica_backoff). Добавку ведёт закон в тике от позы копии прошлого тика: свой шаг копии —
+// шаг снимка, из него ход снимка к копии по добавке съедает добавку (тело хоста отошло — снимок догоняет копию, копия
+// стоит: двойного отхода нет), остаток добавки сходит к снимку не медленнее экспоненты YIELD_RELAX_S (сверх догона, не
+// быстрее предела отхода); ход к теснящей точке снят, плюс скорость уступки. Снимок не нарушает закон — добавка не
+// растёт и сходит без рывка. Тело, хит-тела и визуал — в позе копии.
 class EnemyReplicas : public RefCounted {
 	GDCLASS(EnemyReplicas, RefCounted);
 
 public:
 	static constexpr int CAP = 16; // Точек (≈0.5 с при 30 Гц)
 	static constexpr int F = 7; // Чисел на точку: x, y, z, yaw, speed, step_lag, пространство
+	// Местная уступка: остаток добавки, который снимок не догоняет (тело хоста не отошло: стена), сходит к снимку с этим
+	// временем, с (≈ петля сети: за столько снимок догнал бы)
+	static constexpr real_t YIELD_RELAX_S = 0.25f;
+	// Шаг снимка за тик длиннее — скачок (телепорт, портал): добавка снята, м
+	static constexpr real_t YIELD_JUMP = 1.0f;
 
 private:
 	struct Replica {
@@ -68,12 +82,17 @@ private:
 		EnemyAnim anim;
 		EnemyArms arms;
 		EnemyWake wake;
+		EnemyBackoff bo; // Числа уступки своему игроку (replica_set_backoff)
+		Vector3 bo_off; // Местная добавка к позе снимка (система bo_space, горизонталь)
+		Vector3 bo_prev; // Поза снимка прошлого тика (система bo_space)
+		int bo_space = -1; // Пространство добавки; -1 — прошлого тика нет
 	};
 
 	struct Space {
 		ObjectID node_id;
 		bool frame = false; // Подвижная система (query_xform); нет — корень карты (global_transform)
 		Transform3D xf;
+		Transform3D inv;
 	};
 
 	LocalVector<Replica> reps;
@@ -84,6 +103,8 @@ private:
 	PackedInt32Array due_handles;
 	Array due_clips;
 	PackedVector4Array wake_points; // Точки интереса тика (сон хит-форм): центр (мир) и радиус
+	PackedVector4Array prio_points; // Точки приоритета тика: ноги своего игрока (мир), w — радиус касания
+	PackedVector4Array prio_local; // Они же в системе пространства копии (расчёт копии)
 	uint64_t last_tick_usec = 0;
 
 	bool _valid(int p_h) const;
@@ -93,7 +114,9 @@ private:
 	static StringName _pop_due(Replica &r_r, double p_seek);
 	void _space_xforms();
 	Transform3D _space_xf(int p_space) const;
+	const Space *_space(int p_space) const;
 	Transform3D _tumble_base(const Replica &p_r, Node3D *p_body) const;
+	Vector3 _yield(Replica &r_r, const Vector3 &p_world, real_t p_dt);
 
 protected:
 	static void _bind_methods();
@@ -138,6 +161,11 @@ public:
 	// Сон хит-форм (как EnemyBodies.set_wake_points / body_wake_state)
 	void set_wake_points(const PackedVector4Array &p_points) { wake_points = p_points; }
 	int replica_wake_state(int p_h) const;
+	// Приоритет своего игрока (как EnemyBodies.set_priority_points / body_set_backoff): точки — до tick, для него и
+	// дальше, пока не заменят; добавка к позе снимка (система пространства копии, горизонталь) — по последнему тику
+	void set_priority_points(const PackedVector4Array &p_points) { prio_points = p_points; }
+	void replica_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
+	Vector3 replica_backoff(int p_h) const;
 	// Тик копий: ручки копий с наступившими событиями (клипы — get_due_clips, по порядку)
 	PackedInt32Array tick(double p_seek);
 	Array get_due_clips() const { return due_clips; }
