@@ -774,7 +774,7 @@ Vector3 EnemyWorld::_onto_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 
 // --- Приоритет игроков ---
 
 // Скорость уступки: каждая точка ближе касания + зазора (по высоте ±BACKOFF_H) — от неё min(gain · глубина, speed);
-// сумма — не длиннее speed. r_pressed — такая точка есть (и на её оси: направления нет — скорости нет).
+// сумма — не длиннее speed. r_pressed — точка глубже PRESS_EPS (и на её оси: направления нет — скорости нет).
 Vector3 EnemyWorld::_backoff(uint32_t p_h, const Vector3 &p_pos, bool &r_pressed) const {
 	r_pressed = false;
 	const Backoff &c = backoff_cfg[p_h];
@@ -791,8 +791,8 @@ Vector3 EnemyWorld::_backoff(uint32_t p_h, const Vector3 &p_pos, bool &r_pressed
 		if (l2 >= r * r) {
 			continue;
 		}
-		r_pressed = true;
 		const real_t l = Math::sqrt(l2);
+		r_pressed = r_pressed || r - l > PRESS_EPS;
 		if (l < 1e-4f) {
 			continue;
 		}
@@ -836,8 +836,9 @@ bool EnemyWorld::_overlaps(uint32_t p_h, const Vector3 &p_pos) const {
 	return false;
 }
 
-// Перекрытые с призраком (прошлого расчёта: агент или сосед) расходятся — как разведение, у касания до 0. В обычной
-// толпе соседей ближе касания нет (их держат тела), поведение без уступок прежнее.
+// Перекрытые с призраком (прошлого расчёта: агент или сосед) расходятся — как разведение, но не медленнее
+// GHOST_APART_MIN, до касания (дальше — ничего). В обычной толпе соседей ближе касания нет (их держат тела), поведение без
+// уступок прежнее.
 Vector3 EnemyWorld::_ghost_apart(uint32_t p_h, const Vector3 &p_pos) const {
 	Vector3 out;
 	for (const uint32_t j : nb) {
@@ -854,7 +855,7 @@ Vector3 EnemyWorld::_ghost_apart(uint32_t p_h, const Vector3 &p_pos) const {
 		if (l < 1e-4f || l >= r) {
 			continue;
 		}
-		out += d / l * SEPARATION_GAIN * (1.0f - l / r);
+		out += d / l * MAX(SEPARATION_GAIN * (1.0f - l / r), GHOST_APART_MIN);
 	}
 	return out;
 }
