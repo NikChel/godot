@@ -400,6 +400,9 @@ void GodotPhysXBody3D::set_mode(PhysicsServer3D::BodyMode p_mode) {
 		_build_actor();
 		return;
 	}
+	// The flip re-finds the body's trigger pairs (an entry) without their loss: the areas take the pairs back first (an
+	// exit and the re-entry of the same step cancel out), or each re-found pair is a second entry and the body never leaves.
+	space->body_actor_gone(this);
 	const bool kinematic = p_mode == PhysicsServer3D::BODY_MODE_KINEMATIC;
 	dyn->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, kinematic);
 	_apply_dynamic_flags();
