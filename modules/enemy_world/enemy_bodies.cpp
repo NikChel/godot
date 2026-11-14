@@ -29,7 +29,6 @@ void EnemyBodies::setup(const Ref<EnemyWorld> &p_crowd, const Ref<EnemyViews> &p
 	s.crowd = p_crowd;
 	s.node_id = p_root ? p_root->get_instance_id() : ObjectID();
 	spaces.push_back(s);
-	gravity = GLOBAL_GET("physics/3d/default_gravity");
 	_space_xforms();
 }
 
@@ -1002,7 +1001,7 @@ void EnemyBodies::_move_near(Body &r_b, CharacterBody3D *p_body, const Vector3 &
 	if (p_body->is_on_floor()) {
 		v_up = Vector3();
 	} else {
-		v_up -= up * gravity * p_dt;
+		v_up -= up * r_b.jump_gravity * p_dt;
 	}
 	p_body->set_velocity(v_h + v_up);
 	const bool grounded = p_body->is_on_floor();

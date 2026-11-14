@@ -196,7 +196,7 @@ private:
 		int portal_space = -1; // Касание после полёта портала — в это пространство
 		uint64_t land_end = 0;
 		real_t jump_impulse = 4.2f; // Профиль тела (NavMoveProfile)
-		real_t jump_gravity = 9.8f;
+		real_t jump_gravity = 9.8f; // Тяжесть тела: связи и свободное падение (профиль)
 		uint32_t path_epoch = 0; // Эпоха навигации последнего запроса пути
 		LocalVector<uint8_t> link_log; // Виды пройденных связей (пробы)
 		// Неваляшка
@@ -227,7 +227,6 @@ private:
 	HashMap<ObjectID, int> floor_space; // Тело пола -> пространство
 	int space_changes = 0;
 	int tier_override = -1;
-	real_t gravity = 9.8f;
 	RID query_sphere;
 	PackedVector3Array players_pos;
 	PackedByteArray players_alive;
