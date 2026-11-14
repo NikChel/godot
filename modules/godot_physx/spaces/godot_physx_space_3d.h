@@ -86,6 +86,7 @@ class GodotPhysXSpace3D {
 	HashSet<GodotPhysXBody3D *> separation_ray_bodies; // dynamic bodies with a SeparationRayShape3D
 	HashSet<GodotPhysXBody3D *> gravity_scaled_bodies; // rigid bodies whose gravity_scale is neither 0 nor 1
 	HashSet<GodotPhysXBody3D *> motor_driven_bodies; // turned by a running joint motor: kept awake
+	bool stale_area_pairs = false; // body_refiltered since the last step: the areas flush what wasn't re-found
 	// physics/3d/default_linear_damp / default_angular_damp, which the scene
 	// tree sends to the space RID (the space's default area), and the bodies
 	// an Area3D currently overrides that area-level damping for.
@@ -211,6 +212,9 @@ public:
 	void body_removed_from_areas(GodotPhysXBody3D *p_body);
 	// A body's actor is destroyed (rebuilt / removed): every area takes its overlaps back (see GodotPhysXArea3D).
 	void body_actor_gone(GodotPhysXBody3D *p_body);
+	// A live body's shapes are re-inserted in place (mode flip, re-filtering): every area keeps its overlaps until the
+	// next step re-finds them; the ones not re-found leave after that step's results (GodotPhysXArea3D::ActivePair).
+	void body_refiltered(GodotPhysXBody3D *p_body);
 	// One of a body's shapes is detached from its live actor (a shape swapped / disabled in place): the same, for
 	// the overlaps of that shape only.
 	void body_shape_gone(GodotPhysXBody3D *p_body, int p_shape);

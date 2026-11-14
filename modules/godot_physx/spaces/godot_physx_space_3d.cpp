@@ -439,6 +439,13 @@ void GodotPhysXSpace3D::step(real_t p_step) {
 	flush_material_releases(); // (see defer_material_release: removals reach this scene's sync below)
 	px_scene->simulate((PxReal)p_step);
 	px_scene->fetchResults(true); // fills body contact buffers via g_contact_callback
+	// Re-found area pairs of re-filtered bodies came in onTrigger above; the rest leave now, before call_queries().
+	if (stale_area_pairs) {
+		stale_area_pairs = false;
+		for (GodotPhysXArea3D *area : areas) {
+			area->flush_stale_pairs();
+		}
+	}
 
 	// Pull back actors that moved this step (eENABLE_ACTIVE_ACTORS), plus one
 	// final pull for bodies that just went to sleep so their resting pose and
@@ -508,6 +515,13 @@ void GodotPhysXSpace3D::body_actor_gone(GodotPhysXBody3D *p_body) {
 	for (GodotPhysXArea3D *area : areas) {
 		area->body_actor_gone(p_body);
 	}
+}
+
+void GodotPhysXSpace3D::body_refiltered(GodotPhysXBody3D *p_body) {
+	for (GodotPhysXArea3D *area : areas) {
+		area->body_refiltered(p_body);
+	}
+	stale_area_pairs = true;
 }
 
 void GodotPhysXSpace3D::body_shape_gone(GodotPhysXBody3D *p_body, int p_shape) {

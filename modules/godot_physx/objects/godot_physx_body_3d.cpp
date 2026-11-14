@@ -400,9 +400,10 @@ void GodotPhysXBody3D::set_mode(PhysicsServer3D::BodyMode p_mode) {
 		_build_actor();
 		return;
 	}
-	// The flip re-finds the body's trigger pairs (an entry) without their loss: the areas take the pairs back first (an
-	// exit and the re-entry of the same step cancel out), or each re-found pair is a second entry and the body never leaves.
-	space->body_actor_gone(this);
+	// The flip re-inserts the body's shapes: PhysX re-finds its trigger pairs in the next step (an entry) without their
+	// loss. The areas keep the pairs counted until then and swallow the re-entry (the body keeps their gravity on that
+	// step); a pair not re-found leaves after it -- otherwise each re-found pair is a second entry, the body never leaves.
+	space->body_refiltered(this);
 	const bool kinematic = p_mode == PhysicsServer3D::BODY_MODE_KINEMATIC;
 	dyn->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, kinematic);
 	_apply_dynamic_flags();
@@ -922,11 +923,11 @@ void GodotPhysXBody3D::_collision_exceptions_changed() {
 	// Pairs already touching keep their old filter result until re-filtered.
 	PxRigidActor *actor = _state_actor();
 	if (actor && actor->getScene()) {
-		// Re-filtering finds the body's trigger pairs again (an entry), but their loss never reaches the areas: they take
-		// the pairs back first (an exit and the re-entry of the same step cancel out), or each re-found pair is a second
-		// entry and the body never leaves the area.
+		// Re-filtering finds the body's trigger pairs again in the next step (an entry), but their loss never reaches
+		// the areas: they keep the pairs counted until then and swallow the re-entry (the body keeps their gravity on
+		// that step), or each re-found pair is a second entry and the body never leaves the area.
 		if (space) {
-			space->body_actor_gone(this);
+			space->body_refiltered(this);
 		}
 		actor->getScene()->resetFiltering(*actor);
 	}

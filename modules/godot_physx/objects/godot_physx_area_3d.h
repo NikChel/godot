@@ -135,11 +135,17 @@ private:
 	// REMOVED (pointers no longer usable), so an actor rebuild / removal takes its pairs back here instead: an exit is
 	// queued per pair, and a rebuilt actor that still overlaps re-reports an enter on the next step -- the two cancel
 	// in call_queries() (no signals), a body that really left gets its body_exited.
+	// A live body whose pairs PhysX re-finds in place (mode flip, re-filtering: body_refiltered) keeps them counted
+	// instead: `stale` of the count wait for their re-entry this step (it is swallowed, not counted again); the ones
+	// not re-found leave after the step's results (flush_stale_pairs) -- the body keeps the area's gravity / damping on
+	// the step in between, the signals are as with the take-back.
 	struct ActivePair {
 		GodotPhysXBody3D *body = nullptr;
 		int count = 0;
+		int stale = 0;
 	};
 	HashMap<OverlapKey, ActivePair, OverlapKeyHasher> active_pairs;
+	bool has_stale = false; // some active pair waits for its re-entry (flush_stale_pairs)
 	void _release_all_pairs();
 
 	Callable area_monitor_callback;
@@ -250,6 +256,11 @@ public:
 	void body_removed(GodotPhysXBody3D *p_body) { overlapping_bodies.erase(p_body); }
 	// A body's PhysX actor is being destroyed (rebuilt or removed): queue an exit for each pair it holds here.
 	void body_actor_gone(GodotPhysXBody3D *p_body);
+	// A live body's trigger pairs are about to be re-found by PhysX in place (its shapes re-inserted into the broad
+	// phase: mode flip, re-filtering): they stay counted until this step's re-entry (see ActivePair::stale).
+	void body_refiltered(GodotPhysXBody3D *p_body);
+	// After the step's results (onTrigger): the pairs not re-found leave (an exit each).
+	void flush_stale_pairs();
 	// A shape this area uses changed its data: rebuild the actor with it.
 	void shape_changed(GodotPhysXShape3D *p_shape);
 	// The shape is being freed: drop every entry using it.
