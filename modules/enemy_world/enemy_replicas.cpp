@@ -216,6 +216,8 @@ void EnemyReplicas::_take(Replica &r_r, int p_a, int p_b, real_t p_f) {
 	r_r.yaw = Math::lerp_angle(a[3], b[3], p_f);
 	r_r.speed = Math::lerp(a[4], b[4], p_f);
 	r_r.step_lag = Math::lerp(a[5], b[5], p_f);
+	r_r.move = (int)(p_f < 0.5f ? a[7] : b[7]);
+	r_r.pitch = Math::lerp(a[8], b[8], p_f);
 }
 
 bool EnemyReplicas::sample_local(int p_h, double p_seek) {
@@ -503,6 +505,23 @@ Vector3 EnemyReplicas::replica_backoff(int p_h) const {
 	return reps[p_h].bo_off;
 }
 
+int EnemyReplicas::replica_move(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), 0);
+	return reps[p_h].move;
+}
+
+real_t EnemyReplicas::replica_pitch(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), 0.0f);
+	return reps[p_h].pitch;
+}
+
+Vector3 EnemyReplicas::replica_aim(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector3(0.0f, 0.0f, -1.0f));
+	const Replica &r = reps[p_h];
+	const Basis b = _space_xf(r.space).basis * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw) * Basis(Vector3(1.0f, 0.0f, 0.0f), r.pitch);
+	return b.xform(Vector3(0.0f, 0.0f, -1.0f));
+}
+
 int EnemyReplicas::get_replica_count() const {
 	return (int)(reps.size() - free_handles.size());
 }
@@ -526,6 +545,9 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("replica_yaw", "handle"), &EnemyReplicas::replica_yaw);
 	ClassDB::bind_method(D_METHOD("replica_speed", "handle"), &EnemyReplicas::replica_speed);
 	ClassDB::bind_method(D_METHOD("replica_step_lag", "handle"), &EnemyReplicas::replica_step_lag);
+	ClassDB::bind_method(D_METHOD("replica_move", "handle"), &EnemyReplicas::replica_move);
+	ClassDB::bind_method(D_METHOD("replica_pitch", "handle"), &EnemyReplicas::replica_pitch);
+	ClassDB::bind_method(D_METHOD("replica_aim", "handle"), &EnemyReplicas::replica_aim);
 	ClassDB::bind_method(D_METHOD("tick", "seek"), &EnemyReplicas::tick);
 	ClassDB::bind_method(D_METHOD("replica_set_tumbler", "handle", "hit_body", "inertia", "frequency", "damping", "fall_angle", "down_angle", "height", "down_time", "rise_time", "stagger_angle", "knockback"), &EnemyReplicas::replica_set_tumbler);
 	ClassDB::bind_method(D_METHOD("replica_push", "handle", "arm", "impulse"), &EnemyReplicas::replica_push);

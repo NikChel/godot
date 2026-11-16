@@ -2,6 +2,8 @@
 
 #include "enemy_anim.h"
 #include "enemy_arms.h"
+#include "enemy_flight_grid.h"
+#include "enemy_gravity_zones.h"
 #include "enemy_links.h"
 #include "enemy_rig.h"
 #include "enemy_tumbler.h"
@@ -54,6 +56,16 @@ class Node3D;
 // без разгона (зазор не качается); своя — скорость тела без уступки прошлого тика. Взгляд — по своей скорости (пятится
 // лицом к цели). Призрак толпы — исключения пар с телами ходоков ближе GHOST_R (свои; проверка пары — в обе стороны,
 // свип соседа его тоже не видит): уступающий не упирается в соседей, снимаются за GHOST_R + GHOST_HYST и после призрака.
+// Полёт (бриф 2026-11-14, срез 1; enemy_bodies_flight.cpp): способ передвижения тела — ИДЁТ (как выше) / ЛЕТИТ; кукла —
+// неваляшка и body_set_ragdoll, как у ходящих. Тяжесть в центре тела — зоны карты (set_gravity_zones); без тяжести в
+// пространстве корабля тело взлетает, когда пешком хуже: оторвано от пола дольше AIRBORNE_S, конец пешего пути дальше
+// FOOT_GAP от цели или лётом в FLY_GAIN раз короче (поле сетки полёта set_flight_grid); тяжесть вернулась — снова ИДЁТ
+// (падает телом, ближний ярус до пола). Профиль FLIGHT_ALWAYS — летает всегда (следующий срез). Летящее тело — вне толпы
+// (агент снят, вернётся на посадке); мозг тот же; скорость — закон игрока в невесомости (PlayerFreeMove: разгон, торможение,
+// вверх / вниз отдельно; числа — body_set_flight); направление — путь сетки (EnemyFlightGrid.steer) к центру цели;
+// ближний ярус — CharacterBody3D в плавающем режиме (move_and_slide), дальний — без физики по свободным клеткам. Досягаемость
+// и прицел удара (body_aim: взгляд с наклоном к центру цели) — объёмные; уступка игрокам — то же правило по капсулам по
+// верху тела. Пересчёт полей — flight_step с бюджетом (отдельно от тика).
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -81,6 +93,16 @@ public:
 		EVENT_LINK_OPEN, // Открыть связь в карте (ручка — номер связи)
 		EVENT_FALL, // Неваляшка начала падать (GDScript: кукла — EnemyWalker, spec 2026-11-02-walker-ragdoll-design)
 		EVENT_RISE, // Лежащий куклой встаёт (body_set_ragdoll): неваляшка выпрямлена, мозг держит rise_time
+	};
+
+	enum Move {
+		MOVE_WALK,
+		MOVE_FLY,
+	};
+
+	enum Flight {
+		FLIGHT_ZERO_G, // Летает только без тяжести
+		FLIGHT_ALWAYS, // Летает всегда
 	};
 
 	// Мозг (WalkerBrain)
@@ -125,6 +147,19 @@ public:
 	// Приоритет игроков: призрак не упирается в ходоков ближе этого; исключение снимается дальше GHOST_R + GHOST_HYST
 	static constexpr real_t GHOST_R = 1.0f;
 	static constexpr real_t GHOST_HYST = 0.3f;
+	// Полёт
+	static constexpr real_t CENTER_H = 0.9f; // Центр тела над ногами (капсула ходока и игрока)
+	static constexpr real_t ZERO_G = 0.01f; // Тяжесть в центре тела меньше, м/с², — невесомость
+	static constexpr real_t AIRBORNE_S = 0.25f; // Без тяжести оторван от пола дольше — летит
+	static constexpr real_t FOOT_GAP = 1.0f; // Конец пешего пути дальше от цели — пешком не достать
+	static constexpr real_t FLY_GAIN = 1.5f; // Лётом короче пешего во столько раз — летит
+	static constexpr real_t FLY_STOP = 0.9f; // Погоня лётом: центр к центру цели ближе — без ввода (тормозит)
+	static constexpr real_t FLY_REACH = 1.3f; // Досягаемость удара лётом: центр к центру
+	static constexpr real_t FLY_SECTOR_H = 0.3f; // Цель по горизонтали ближе — сектор взгляда не нужен (над / под телом)
+	static constexpr real_t ARRIVE_S = 0.3f; // Подлёт: ввод слабеет, когда до остановки меньше скорости × столько
+	static constexpr real_t CAPSULE_LO = 0.3f; // Капсула уступки лётом по верху тела (ноги + …), м
+	static constexpr real_t CAPSULE_HI = 1.5f;
+	static constexpr real_t LAND_MAX_S = 3.0f; // После возврата тяжести ближний ярус до пола, не дольше
 
 private:
 	enum LinkState {
@@ -218,6 +253,23 @@ private:
 		LocalVector<int> ghost_h; // Исключения пар призрака: ручка тела ходока …
 		LocalVector<ObjectID> ghost_id; // … его тело …
 		LocalVector<RID> ghost_rid; // … и RID (снимается и после удаления тела)
+		// Полёт
+		uint8_t move = MOVE_WALK;
+		uint8_t flight = FLIGHT_ZERO_G; // Профиль (body_set_flight)
+		real_t fly_speed = 4.5f; // Числа закона полёта (PlayerFreeMove): скорость, м/с; времена до 95%, с
+		real_t fly_accel_time = 0.5f;
+		real_t fly_brake_time = 1.0f;
+		bool zero_g = false; // Тяжесть в центре тела этого тика меньше ZERO_G
+		int air_ticks = 0; // Без тяжести не на полу тиков подряд
+		bool path_known = false; // Последний пеший путь: длина и зазор его конца до цели
+		real_t path_len = 0.0f;
+		real_t path_gap = 0.0f;
+		real_t fly_dist = -1.0f; // Путь лётом до цели по полю прошлого тика, м (< 0 — нет поля)
+		real_t pitch = 0.0f; // Наклон взгляда к центру цели (удар), рад; идёт — 0
+		uint64_t fall_end = 0; // Тяжесть вернулась: ближний ярус до пола, не дольше этого тика
+		bool landing = false;
+		int take_offs = 0; // Взлётов / посадок всего (пробы)
+		int landings = 0;
 	};
 
 	LocalVector<Body> bodies;
@@ -244,6 +296,11 @@ private:
 	int land_close = 0;
 	int on_link = 0;
 	int portal_transits = 0;
+	// Полёт
+	Ref<EnemyFlightGrid> flight_grid; // Сетка полёта пространства корабля (0); нет — полёта нет
+	EnemyGravityZones gzones;
+	int fly_count = 0; // Летящих за последний тик
+	uint64_t last_flight_usec = 0;
 
 	bool _valid(int p_h) const;
 	void _space_xforms();
@@ -293,6 +350,20 @@ private:
 	void _bodies_outside(CharacterBody3D *p_body, const Vector3 &p_up, uint32_t p_mask, HashSet<RID> &r_out);
 	static real_t _probe(CharacterBody3D *p_body, PhysicsServer3D::MotionParameters &r_params, const Vector3 &p_fwd, const Vector3 &p_up, uint32_t p_mask);
 	static bool _test(CharacterBody3D *p_body, PhysicsServer3D::MotionParameters &r_params, const Transform3D &p_from, const Vector3 &p_motion, PhysicsServer3D::MotionResult &r_res);
+	// Полёт (enemy_bodies_flight.cpp)
+	bool _grid_ok(const Body &p_b) const;
+	void _zone_tick(Body &r_b, CharacterBody3D *p_body);
+	void _flight_targets(uint64_t p_now);
+	bool _wants_fly(const Body &p_b, CharacterBody3D *p_body, uint64_t p_now);
+	void _take_off(int p_h, Body &r_b, CharacterBody3D *p_body);
+	void _land(Body &r_b, CharacterBody3D *p_body, uint64_t p_now);
+	void _tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
+	Vector3 _fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const;
+	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, real_t p_dt);
+	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
+	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);
+	static real_t _halflife(real_t p_time);
+	static Vector3 _aim(const Body &p_b, const Transform3D &p_fx);
 
 protected:
 	static void _bind_methods();
@@ -377,13 +448,29 @@ public:
 	void body_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
 	Vector3 body_backoff(int p_h) const;
 	bool body_ghost(int p_h) const;
+	// Полёт: сетка пространства корабля; зоны тяжести карты (Area3D GravityZone; список — при его смене); числа тела
+	// (Flight, скорость, времена разгона и торможения до 95%); пересчёт полей по бюджету (после tick); тяжесть точки;
+	// способ передвижения, прицел удара (мир: взгляд с наклоном к цели), путь лётом, счётчики (пробы)
+	void set_flight_grid(const Ref<EnemyFlightGrid> &p_grid) { flight_grid = p_grid; }
+	Ref<EnemyFlightGrid> get_flight_grid() const { return flight_grid; }
+	void set_gravity_zones(const Array &p_areas) { gzones.set(p_areas); }
+	void body_set_flight(int p_h, int p_flight, real_t p_speed, real_t p_accel_time, real_t p_brake_time);
+	void flight_step(int p_budget_usec);
+	bool zero_g_at(const Vector3 &p_world);
+	int body_move(int p_h) const;
+	Vector3 body_aim(int p_h) const;
+	real_t body_pitch(int p_h) const;
+	real_t body_fly_dist(int p_h) const;
+	Vector3i body_flight_stats(int p_h) const; // x — взлётов, y — посадок, z — без тяжести сейчас (1 / 0)
+	int get_fly_count() const { return fly_count; }
+	int64_t get_last_flight_usec() const { return (int64_t)last_flight_usec; }
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);
 	void set_nav_ready(bool p_ready); // Сетка корабля (пространство 0)
 	void set_tier_override(int p_tier); // -1 — по расстоянию (пробы: TIER_NEAR / TIER_FAR)
 	PackedInt32Array tick(real_t p_delta); // События: пары (Event, ручка)
-	Array net_pack() const; // [тик, PackedInt32Array net id, PackedFloat32Array по 7 чисел: x, y, z, yaw, speed, step_lag, пространство] (поза и взгляд — в системе пространства)
+	Array net_pack() const; // [тик, PackedInt32Array net id, PackedFloat32Array по EnemyReplicas::F чисел: x, y, z, yaw, speed, step_lag, пространство, способ передвижения, наклон взгляда] (поза и взгляд — в системе пространства)
 	int get_body_count() const;
 	int get_tier_count(int p_tier) const;
 	int get_rest_count() const { return rest_count; } // Тел в покое за последний тик
@@ -397,3 +484,5 @@ public:
 VARIANT_ENUM_CAST(EnemyBodies::Brain);
 VARIANT_ENUM_CAST(EnemyBodies::Tier);
 VARIANT_ENUM_CAST(EnemyBodies::Event);
+VARIANT_ENUM_CAST(EnemyBodies::Move);
+VARIANT_ENUM_CAST(EnemyBodies::Flight);

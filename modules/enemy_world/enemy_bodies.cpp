@@ -168,7 +168,7 @@ void EnemyBodies::_set_space(int p_h, Body &r_b, int p_space, CharacterBody3D *p
 	r_b.space = p_space;
 	const Space &sp = spaces[p_space];
 	const Vector3 pos = p_body->get_global_position();
-	if (sp.crowd.is_valid()) {
+	if (sp.crowd.is_valid() && r_b.move != MOVE_FLY) { // Летящего толпа не видит (агент — на посадке)
 		r_b.crowd = sp.crowd->agent_add(sp.inv.xform(pos));
 		_set_backoff_agent(r_b);
 	}
@@ -261,7 +261,14 @@ void EnemyBodies::body_clear_point(int p_h) {
 
 void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links) {
 	ERR_FAIL_COND(!_valid(p_h));
-	const Body &b = bodies[p_h];
+	Body &b = bodies[p_h];
+	// Пеший путь для выбора полёта: длина и зазор конца до цели (пустой — пешком не достать)
+	b.path_known = true;
+	b.path_len = 0.0f;
+	for (int i = 1; i < p_points.size(); i++) {
+		b.path_len += p_points[i - 1].distance_to(p_points[i]);
+	}
+	b.path_gap = p_points.is_empty() ? (real_t)Math::INF : p_points[p_points.size() - 1].distance_to(p_target);
 	EnemyWorld *c = _crowd(b);
 	if (c != nullptr && b.crowd >= 0) {
 		c->agent_set_path(b.crowd, p_points, p_target, p_links);
@@ -315,7 +322,7 @@ void EnemyBodies::body_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia
 	t.knockback = p_knockback;
 }
 
-// Толчок: наклон и отброс — горизонталь импульса (кадр основания) в скорость тела.
+// Толчок: наклон и отброс — горизонталь импульса (кадр основания) в скорость тела; летящему — весь импульс.
 void EnemyBodies::body_push(int p_h, const Vector3 &p_r, const Vector3 &p_j) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
@@ -325,8 +332,8 @@ void EnemyBodies::body_push(int p_h, const Vector3 &p_r, const Vector3 &p_j) {
 	b.tumb.push(p_r, p_j);
 	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
 	if (body != nullptr) {
-		const Vector3 j_h = Vector3(p_j.x, 0.0f, p_j.z) * b.tumb.knockback;
-		body->set_velocity(body->get_velocity() + _frame_xform(b).basis.xform(j_h));
+		const Vector3 j = (b.move == MOVE_FLY ? p_j : Vector3(p_j.x, 0.0f, p_j.z)) * b.tumb.knockback;
+		body->set_velocity(body->get_velocity() + _frame_xform(b).basis.xform(j));
 	}
 }
 
@@ -528,10 +535,15 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	tier_counts[TIER_NEAR] = 0;
 	tier_counts[TIER_FAR] = 0;
 	rest_count = 0;
+	fly_count = 0;
 	_space_xforms();
+	gzones.refresh();
 	_priority_to_spaces(); // До первого запроса толпы в тике (_links_tick спрашивает count_near)
 	_links_tick(p_delta);
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
+	if (flight_grid.is_valid() && flight_grid->is_ready() && !spaces.is_empty()) {
+		_flight_targets(now);
+	}
 	for (uint32_t h = 0; h < bodies.size(); h++) {
 		Body &b = bodies[h];
 		if (!b.used || b.dead) {
@@ -574,6 +586,14 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	if (r_b.link_state == LINK_ON || r_b.link_state == LINK_LAND) {
 		_link_move(p_h, r_b, p_body, fx, p_now, p_dt);
 		return;
+	}
+	_zone_tick(r_b, p_body);
+	if (r_b.move == MOVE_FLY) { // Летит (enemy_bodies_flight.cpp); тяжесть вернулась — садится и идёт
+		if (_grid_ok(r_b) && (r_b.flight == FLIGHT_ALWAYS || r_b.zero_g)) {
+			_tick_fly(p_h, r_b, p_body, fx, p_now, p_dt);
+			return;
+		}
+		_land(r_b, p_body, p_now);
 	}
 	const Space &sp = spaces[r_b.space]; // Пространство на начало тика (правило пола меняет его после шага)
 	Vector3 want; // Мир
@@ -643,6 +663,19 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	}
 	r_b.want_speed = (want + backoff).length(); // Предметы у ног толкает и пятясь
 	r_b.state = st;
+	// Полёт: без тяжести не на полу (тиков подряд), путь лётом до цели, взлёт — со следующего тика
+	const bool off_floor = r_b.tier == TIER_NEAR && !p_body->is_on_floor();
+	r_b.air_ticks = (r_b.zero_g && r_b.link_state == LINK_NONE && off_floor) ? r_b.air_ticks + 1 : 0;
+	if (r_b.landing && (!off_floor || p_now >= r_b.fall_end)) {
+		r_b.landing = false;
+	}
+	r_b.fly_dist = -1.0f;
+	if (r_b.zero_g && r_b.moving && !r_b.point_set && _grid_ok(r_b)) {
+		r_b.fly_dist = flight_grid->field_dist((int64_t)r_b.target, spaces[0].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
+	}
+	if (r_b.move == MOVE_WALK && _wants_fly(r_b, p_body, p_now)) {
+		_take_off(p_h, r_b, p_body);
+	}
 	_publish(r_b, p_body, fx, vel, goal, has_goal, p_now);
 }
 
@@ -868,6 +901,9 @@ int EnemyBodies::_pick(const Vector3 &p_pos) const {
 
 // Цель ближе REACH (по горизонтали верха тела) и в секторе перед взглядом.
 bool EnemyBodies::_in_reach(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const {
+	if (p_b.move == MOVE_FLY) {
+		return _in_reach_fly(p_b, p_body, p_fx, p_target); // Объёмная (enemy_bodies_flight.cpp)
+	}
 	const Vector3 up = p_b.up;
 	Vector3 d = p_target - p_body->get_global_position();
 	const real_t dh = d.dot(up);
@@ -961,7 +997,9 @@ void EnemyBodies::_update_tier(Body &r_b, const Vector3 &p_pos) {
 		r_b.tier = (uint8_t)tier_override;
 		return;
 	}
-	if (!_nav_ok(r_b) || players_pos.is_empty()) {
+	// Летящему дальний ярус — по сетке полёта; падающему после полёта — ближний до пола
+	const bool far_ok = r_b.move == MOVE_FLY ? _grid_ok(r_b) : (_nav_ok(r_b) && !r_b.landing);
+	if (!far_ok || players_pos.is_empty()) {
 		r_b.tier = TIER_NEAR;
 		return;
 	}
@@ -1200,6 +1238,8 @@ Array EnemyBodies::net_pack() const {
 			data.push_back(b.view_speed);
 			data.push_back(b.lag_curr);
 			data.push_back((float)b.space);
+			data.push_back((float)b.move);
+			data.push_back(b.pitch);
 		}
 	}
 	Array out;
@@ -1295,6 +1335,19 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_land_close"), &EnemyBodies::get_land_close);
 	ClassDB::bind_method(D_METHOD("get_closed_links"), &EnemyBodies::get_closed_links);
 	ClassDB::bind_method(D_METHOD("get_on_link_count"), &EnemyBodies::get_on_link_count);
+	ClassDB::bind_method(D_METHOD("set_flight_grid", "grid"), &EnemyBodies::set_flight_grid);
+	ClassDB::bind_method(D_METHOD("get_flight_grid"), &EnemyBodies::get_flight_grid);
+	ClassDB::bind_method(D_METHOD("set_gravity_zones", "areas"), &EnemyBodies::set_gravity_zones);
+	ClassDB::bind_method(D_METHOD("body_set_flight", "handle", "flight", "speed", "accel_time", "brake_time"), &EnemyBodies::body_set_flight);
+	ClassDB::bind_method(D_METHOD("flight_step", "budget_usec"), &EnemyBodies::flight_step);
+	ClassDB::bind_method(D_METHOD("zero_g_at", "world"), &EnemyBodies::zero_g_at);
+	ClassDB::bind_method(D_METHOD("body_move", "handle"), &EnemyBodies::body_move);
+	ClassDB::bind_method(D_METHOD("body_aim", "handle"), &EnemyBodies::body_aim);
+	ClassDB::bind_method(D_METHOD("body_pitch", "handle"), &EnemyBodies::body_pitch);
+	ClassDB::bind_method(D_METHOD("body_fly_dist", "handle"), &EnemyBodies::body_fly_dist);
+	ClassDB::bind_method(D_METHOD("body_flight_stats", "handle"), &EnemyBodies::body_flight_stats);
+	ClassDB::bind_method(D_METHOD("get_fly_count"), &EnemyBodies::get_fly_count);
+	ClassDB::bind_method(D_METHOD("get_last_flight_usec"), &EnemyBodies::get_last_flight_usec);
 
 	BIND_ENUM_CONSTANT(BRAIN_IDLE);
 	BIND_ENUM_CONSTANT(BRAIN_CHASE);
@@ -1312,4 +1365,8 @@ void EnemyBodies::_bind_methods() {
 	BIND_ENUM_CONSTANT(EVENT_LINK_OPEN);
 	BIND_ENUM_CONSTANT(EVENT_FALL);
 	BIND_ENUM_CONSTANT(EVENT_RISE);
+	BIND_ENUM_CONSTANT(MOVE_WALK);
+	BIND_ENUM_CONSTANT(MOVE_FLY);
+	BIND_ENUM_CONSTANT(FLIGHT_ZERO_G);
+	BIND_ENUM_CONSTANT(FLIGHT_ALWAYS);
 }
