@@ -53,7 +53,7 @@ Vector3 EnemyBodies::_aim(const Body &p_b, const Transform3D &p_fx) {
 }
 
 bool EnemyBodies::_grid_ok(const Body &p_b) const {
-	return p_b.space == 0 && flight_grid.is_valid() && flight_grid->is_ready();
+	return p_b.space == 0 && flight.is_valid() && flight->is_ready();
 }
 
 // Тяжесть в центре тела (зоны этого тика); вне зон — тяжесть мира (не невесомость).
@@ -80,14 +80,14 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 		if (ti < 0 || !_player_alive(ti)) {
 			continue;
 		}
-		flight_grid->want((int64_t)b.target, sp.inv.xform(players_pos[ti] + b.up * CENTER_H), p_now);
+		flight->want((int64_t)b.target, sp.inv.xform(players_pos[ti] + b.up * CENTER_H), p_now);
 	}
 }
 
 void EnemyBodies::flight_step(int p_budget_usec) {
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
-	if (flight_grid.is_valid() && flight_grid->is_ready()) {
-		flight_grid->step(p_budget_usec, Engine::get_singleton()->get_physics_frames());
+	if (flight.is_valid() && flight->is_ready()) {
+		flight->step(p_budget_usec, Engine::get_singleton()->get_physics_frames());
 	}
 	last_flight_usec = OS::get_singleton()->get_ticks_usec() - t0;
 }
@@ -225,14 +225,15 @@ void EnemyBodies::_fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_
 	const Space &sp = spaces[r_b.space];
 	const Vector3 c = sp.inv.xform(p_body->get_global_position() + r_b.up * CENTER_H);
 	Vector3 vl = sp.inv.basis.xform(p_v);
-	const real_t cs = flight_grid->get_cell();
-	const Vector3 org = flight_grid->get_origin();
+	const EnemyFlightGrid *g = flight->get_grid().ptr();
+	const real_t cs = g->get_cell();
+	const Vector3 org = g->get_origin();
 	Vector3 q = c;
 	for (int k = 0; k < 3; k++) {
 		Vector3 t = q;
 		t[k] += vl[k] * p_dt;
 		const bool same = Math::floor((t[k] - org[k]) / cs) == Math::floor((q[k] - org[k]) / cs);
-		if (same || flight_grid->is_free(t)) {
+		if (same || g->is_free(t)) {
 			q = t;
 		} else {
 			vl[k] = 0.0f;
@@ -277,7 +278,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 		if (_grid_ok(r_b)) {
 			const Space &sp = spaces[r_b.space];
 			Vector3 aim_l;
-			flight_grid->steer(r_b.point_set ? (int64_t)0 : (int64_t)r_b.target, sp.inv.xform(center), sp.inv.xform(goal), aim_l, dist);
+			flight->steer(r_b.point_set ? (int64_t)0 : (int64_t)r_b.target, sp.inv.xform(center), sp.inv.xform(goal), aim_l, dist);
 			aim = sp.xf.xform(aim_l);
 		}
 		r_b.fly_dist = dist;
