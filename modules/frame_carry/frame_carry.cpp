@@ -4,12 +4,8 @@
 #include "core/math/math_funcs.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
-#include "core/string/print_string.h"
-#include "scene/3d/physics/area_3d.h"
-#include "scene/3d/physics/collision_shape_3d.h"
 #include "scene/3d/physics/rigid_body_3d.h"
 #include "scene/main/scene_tree.h"
-#include "scene/resources/3d/box_shape_3d.h"
 #include "servers/physics_3d/physics_server_3d.h"
 
 RigidBody3D *FrameCarry::_body(ObjectID p_id) {
@@ -41,171 +37,17 @@ void FrameCarry::_erase(uint32_t p_i) {
 	rider_at.erase(id);
 }
 
-int FrameCarry::_frame(ObjectID p_id) const {
-	for (uint32_t i = 0; i < frames_t.size(); i++) {
-		if (frames_t[i].id == p_id) {
-			return (int)i;
-		}
-	}
-	return -1;
-}
-
-// Системы этого тика (ReferenceFrame.spaces): поза запросов, шаг, зоны с коробками и тяжестью — по вызову на систему и
-// на зону.
-void FrameCarry::_sync(const Array &p_frames) {
-	frames_t.clear();
-	zones_t.clear();
-	for (int i = 0; i < p_frames.size(); i++) {
-		Node3D *n = Object::cast_to<Node3D>(p_frames[i].get_validated_object());
-		if (n == nullptr) {
-			continue;
-		}
-		FrameTick f;
-		f.id = n->get_instance_id();
-		f.query = n->call(SNAME("query_xform"));
-		f.step = n->call(SNAME("step_xform"));
-		f.field = _field(n);
-		Callable *cb = step_cbs.getptr(f.id);
-		if (cb == nullptr) {
-			cb = &step_cbs.insert(f.id, callable_mp(this, &FrameCarry::_on_step).bind((int64_t)f.id))->value;
-		}
-		f.on_step = *cb;
-		const int fi = (int)frames_t.size();
-		frames_t.push_back(f);
-		const Array zs = n->get(SNAME("zones"));
-		for (int k = 0; k < zs.size(); k++) {
-			Node3D *z = Object::cast_to<Node3D>(zs[k].get_validated_object());
-			if (z == nullptr) {
-				continue;
-			}
-			ZoneTick zt;
-			zt.id = z->get_instance_id();
-			zt.frame = fi;
-			zt.shape = _shape(z);
-			const Transform3D zx = z->get_global_transform();
-			zt.to_local = zx.affine_inverse();
-			zt.accel = z->call(SNAME("accel"));
-			const AABB &b = zt.shape->bounds;
-			const real_t scale = MAX(zx.basis.get_scale_abs().x, MAX(zx.basis.get_scale_abs().y, zx.basis.get_scale_abs().z));
-			const real_t r = b.size.length() * 0.5f * scale + NEAR_MARGIN;
-			zt.near_c = zx.xform(b.get_center());
-			zt.near_r2 = zt.shape->boxes.is_empty() ? -1.0f : r * r;
-			zones_t.push_back(zt);
-		}
-	}
-}
-
-// Коробки зоны — как GravityZone._ready: BoxShape3D детей CollisionShape3D (включённых).
-const FrameCarry::ZoneShape *FrameCarry::_shape(Node3D *p_zone) {
-	const ObjectID id = p_zone->get_instance_id();
-	const ZoneShape *have = shapes.getptr(id);
-	if (have) {
-		return have;
-	}
-	ZoneShape s;
-	const Area3D *area = Object::cast_to<Area3D>(p_zone);
-	s.priority = area ? area->get_priority() : 0;
-	for (int i = 0; i < p_zone->get_child_count(); i++) {
-		const CollisionShape3D *cs = Object::cast_to<CollisionShape3D>(p_zone->get_child(i));
-		if (cs == nullptr || cs->is_disabled()) {
-			continue;
-		}
-		const Ref<BoxShape3D> box = cs->get_shape();
-		if (box.is_null()) {
-			continue;
-		}
-		const Vector3 e = box->get_size() * 0.5;
-		const AABB own(-e, e * 2.0);
-		const Transform3D tf = cs->get_transform();
-		const AABB bb = tf.xform(own);
-		s.bounds = s.boxes.is_empty() ? bb : s.bounds.merge(bb);
-		const bool rot = !tf.basis.is_equal_approx(Basis());
-		s.boxes.push_back(rot ? own : bb);
-		s.inv.push_back(rot ? tf.affine_inverse() : Transform3D());
-		s.rot.push_back(rot ? 1 : 0);
-	}
-	return &shapes.insert(id, s)->value;
-}
-
-// Центр масс главного тела системы (первое кинематическое тело под ней — опора: корпус кабины, пол лифта) в её кадре;
-// тела нет — начало системы.
-Vector3 FrameCarry::_field(Node3D *p_frame) {
-	const ObjectID id = p_frame->get_instance_id();
-	const Vector3 *have = fields.getptr(id);
-	if (have) {
-		return *have;
-	}
-	Vector3 c;
-	String what = "origin";
-	const TypedArray<Node> list = p_frame->find_children("*", "AnimatableBody3D", true, false);
-	if (!list.is_empty()) {
-		const CollisionObject3D *body = Object::cast_to<CollisionObject3D>(list[0]);
-		if (body) {
-			PhysicsDirectBodyState3D *st = PhysicsServer3D::get_singleton()->body_get_direct_state(body->get_rid());
-			const Vector3 com = st ? st->get_center_of_mass_local() : Vector3();
-			c = p_frame->get_global_transform().affine_inverse().xform(body->get_global_transform().xform(com));
-			what = vformat("%s com_local=%s", body->get_name(), com);
-		}
-	}
-	fields.insert(id, c);
-	print_line(vformat("[frame_riders] field %s: %s -> frame %s", String(p_frame->get_path()), what, c));
-	return c;
-}
-
-// Зона подвижной системы, в которой точка (мир, поза запросов этого тика): точка — шагом своей системы к позе commit,
-// где уже стоят её зоны; выше priority — та. −1 — ни в одной.
-int FrameCarry::_zone_at(const Vector3 &p_point) const {
-	int best = -1;
-	int fi = -1;
-	Vector3 q;
-	for (uint32_t i = 0; i < zones_t.size(); i++) {
-		const ZoneTick &z = zones_t[i];
-		if (z.frame != fi) {
-			fi = z.frame;
-			q = frames_t[fi].step.xform(p_point);
-		}
-		if ((best < 0 || z.shape->priority > zones_t[best].shape->priority) && _contains(z, q)) {
-			best = (int)i;
-		}
-	}
-	return best;
-}
-
-// Точка у какой-нибудь зоны систем (сфера её коробок + NEAR_MARGIN): дальше за тик в зону не попасть.
-bool FrameCarry::_near(const Vector3 &p_point) const {
-	for (const ZoneTick &z : zones_t) {
-		if (p_point.distance_squared_to(z.near_c) < z.near_r2) {
-			return true;
-		}
-	}
-	return false;
-}
-
-bool FrameCarry::_contains(const ZoneTick &p_z, const Vector3 &p_point) {
-	const ZoneShape &s = *p_z.shape;
-	const Vector3 l = p_z.to_local.xform(p_point);
-	if (s.boxes.is_empty() || !s.bounds.has_point(l)) {
-		return false;
-	}
-	for (uint32_t i = 0; i < s.boxes.size(); i++) {
-		if (s.boxes[i].has_point(s.rot[i] ? s.inv[i].xform(l) : l)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 // Тело в зоне zi подвижной системы (−1 — вне пространств) на этом тике.
 void FrameCarry::_place(RigidBody3D *p_rb, int p_zi, uint64_t p_t) {
 	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
 	const ObjectID id = p_rb->get_instance_id();
 	int ri = _rider(id);
-	const ObjectID fr = p_zi >= 0 ? frames_t[zones_t[p_zi].frame].id : ObjectID();
+	const ObjectID fr = p_zi >= 0 ? spaces.frames[spaces.zones[p_zi].frame].id : ObjectID();
 	if (ri >= 0 && riders[ri].frame != fr) {
 		if (_dynamic(p_rb)) {
-			const int fi = _frame(riders[ri].frame);
+			const int fi = spaces.frame(riders[ri].frame);
 			if (fi >= 0) {
-				_carry(riders[ri], frames_t[fi].step, frames_t[fi]); // вышло: шаг этого тика ещё с системой
+				_carry(riders[ri], spaces.frames[fi].step, spaces.frames[fi]); // вышло: шаг этого тика ещё с системой
 			}
 			riders[ri].carried = false;
 		}
@@ -237,13 +79,13 @@ void FrameCarry::_place(RigidBody3D *p_rb, int p_zi, uint64_t p_t) {
 	free_seen.erase(id);
 	Rider &r = riders[ri];
 	r.tick = p_t;
-	r.zone = zones_t[p_zi].id;
+	r.zone = spaces.zones[p_zi].id;
 	r.zi = p_zi;
 	r.written = false;
 	r.v = ps->body_get_state(r.rid, PhysicsServer3D::BODY_STATE_LINEAR_VELOCITY);
 	r.w = ps->body_get_state(r.rid, PhysicsServer3D::BODY_STATE_ANGULAR_VELOCITY);
-	_gravity(r, p_rb, zones_t[p_zi].accel);
-	frames_t[zones_t[p_zi].frame].riders = true;
+	_gravity(r, p_rb, spaces.zones[p_zi].accel);
+	ridden[spaces.zones[p_zi].frame] = 1;
 }
 
 // Тяжесть едущего тела — к полу системы постоянной силой; тяжесть PhysX (мира и зон) снята на сервере. Запись — только
@@ -272,7 +114,7 @@ void FrameCarry::_restore(const Rider &p_r) {
 
 // Скорость тела на шаг step системы: несение по полю главного тела системы + своя, повёрнутая шагом; поправка позы — на
 // post. Вошедшее — без записи (скорость в мире та же), без поправки.
-void FrameCarry::_carry(Rider &r_r, const Transform3D &p_step, const FrameTick &p_f) {
+void FrameCarry::_carry(Rider &r_r, const Transform3D &p_step, const FrameSpaces::FrameTick &p_f) {
 	if (p_step == Transform3D()) {
 		if (r_r.written) {
 			_write(r_r, r_r.v, r_r.w);
@@ -310,8 +152,8 @@ void FrameCarry::_carry(Rider &r_r, const Transform3D &p_step, const FrameTick &
 	}
 	r_r.eps = p_step.xform(p) - p - r_r.u * (real_t)dt;
 	const Basis rot(q);
-	if (r_r.zi >= 0 && r_r.zi < (int)zones_t.size() && zones_t[r_r.zi].id == r_r.zone) {
-		_gravity(r_r, rb, zones_t[r_r.zi].accel); // сила — к полу в позе commit (позже в тике — снова)
+	if (r_r.zi >= 0 && r_r.zi < (int)spaces.zones.size() && spaces.zones[r_r.zi].id == r_r.zone) {
+		_gravity(r_r, rb, spaces.zones[r_r.zi].accel); // сила — к полу в позе commit (позже в тике — снова)
 	}
 	PhysicsDirectBodyState3D *st = PhysicsServer3D::get_singleton()->body_get_direct_state(r_r.rid);
 	const double kl = st ? (double)st->get_total_linear_damp() : 0.0; // затухание, которое даст PhysX (зона + своё)
@@ -335,21 +177,14 @@ void FrameCarry::_on_step(const Transform3D &p_step, int64_t p_frame) {
 		return;
 	}
 	const ObjectID fid = ObjectID((uint64_t)p_frame);
-	const int fi = _frame(fid);
+	const int fi = spaces.frame(fid);
 	if (fi < 0) {
 		return;
 	}
-	for (ZoneTick &z : zones_t) { // тяжесть зон системы — в позе этого commit
-		if (z.frame == fi) {
-			Object *o = ObjectDB::get_instance(z.id);
-			if (o) {
-				z.accel = o->call(SNAME("accel"));
-			}
-		}
-	}
+	spaces.refresh_accel(fi); // тяжесть зон системы — в позе этого commit
 	for (Rider &r : riders) {
 		if (r.frame == fid && r.tick == t) {
-			_carry(r, p_step, frames_t[fi]);
+			_carry(r, p_step, spaces.frames[fi]);
 		}
 	}
 }
@@ -364,12 +199,16 @@ void FrameCarry::pre(const Array &p_frames) {
 	pre_tick = t;
 	seen = 0;
 	if (p_frames.is_empty() && riders.is_empty()) {
-		frames_t.clear();
-		zones_t.clear();
+		spaces.clear();
+		ridden.clear();
 		free_seen.clear();
 		return;
 	}
-	_sync(p_frames);
+	spaces.sync(p_frames);
+	ridden.clear();
+	for (uint32_t i = 0; i < spaces.frames.size(); i++) {
+		ridden.push_back(0);
+	}
 	SceneTree *tree = SceneTree::get_singleton();
 	if (tree && group_name != StringName()) {
 		const Vector<Node *> items = tree->get_nodes_in_group(group_name);
@@ -380,13 +219,13 @@ void FrameCarry::pre(const Array &p_frames) {
 			}
 			seen++;
 			const Vector3 at = rb->get_global_position();
-			if (!_near(at)) { // вдали от систем: пассажир — выходит, остальные не числятся
+			if (!spaces.is_close(at)) { // вдали от систем: пассажир — выходит, остальные не числятся
 				if (_rider(rb->get_instance_id()) >= 0) {
 					_place(rb, -1, t);
 				}
 				continue;
 			}
-			_place(rb, _dynamic(rb) ? _zone_at(at) : -1, t);
+			_place(rb, _dynamic(rb) ? spaces.zone_at(at) : -1, t);
 		}
 	}
 	for (KeyValue<int64_t, Group> &kv : groups) {
@@ -396,10 +235,10 @@ void FrameCarry::pre(const Array &p_frames) {
 		}
 		seen++;
 		const RigidBody3D *anchor = _body(g.bodies[0]);
-		const bool in_reach = anchor && anchor->is_inside_tree() && _near(anchor->get_global_position());
-		const int zi = in_reach ? _zone_at(anchor->get_global_position()) : -1;
-		g.zone = zi >= 0 ? zones_t[zi].id : ObjectID();
-		g.frame = zi >= 0 ? frames_t[zones_t[zi].frame].id : ObjectID();
+		const bool in_reach = anchor && anchor->is_inside_tree() && spaces.is_close(anchor->get_global_position());
+		const int zi = in_reach ? spaces.zone_at(anchor->get_global_position()) : -1;
+		g.zone = zi >= 0 ? spaces.zones[zi].id : ObjectID();
+		g.frame = zi >= 0 ? spaces.frames[spaces.zones[zi].frame].id : ObjectID();
 		for (const ObjectID &b : g.bodies) {
 			RigidBody3D *rb = _body(b);
 			if (rb && (in_reach || _rider(b) >= 0)) {
@@ -422,12 +261,20 @@ void FrameCarry::pre(const Array &p_frames) {
 	for (const ObjectID &id : gone) {
 		free_seen.erase(id);
 	}
-	for (const FrameTick &f : frames_t) { // шаг системы — её пассажирам этого тика (ReferenceFrame.ride: сразу и на commit)
-		if (f.riders) {
-			Object *o = ObjectDB::get_instance(f.id);
-			if (o) {
-				o->call(SNAME("ride"), f.on_step);
-			}
+	// Шаг системы — её пассажирам этого тика (ReferenceFrame.ride: сразу и на commit)
+	for (uint32_t i = 0; i < spaces.frames.size(); i++) {
+		if (!ridden[i]) {
+			continue;
+		}
+		const ObjectID fid = spaces.frames[i].id;
+		Callable *cb = step_cbs.getptr(fid);
+		if (cb == nullptr) {
+			cb = &step_cbs.insert(fid, callable_mp(this, &FrameCarry::_on_step).bind((int64_t)fid))->value;
+		}
+		const Callable on_step = *cb;
+		Object *o = ObjectDB::get_instance(fid);
+		if (o) {
+			o->call(SNAME("ride"), on_step);
 		}
 	}
 }
