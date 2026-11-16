@@ -160,6 +160,10 @@ public:
 	static constexpr real_t CAPSULE_LO = 0.3f; // Капсула уступки лётом по верху тела (ноги + …), м
 	static constexpr real_t CAPSULE_HI = 1.5f;
 	static constexpr real_t LAND_MAX_S = 3.0f; // После возврата тяжести ближний ярус до пола, не дольше
+	static constexpr real_t FLY_HOLD_R = 1.0f; // Летящий впереди к цели ближе (центры) — ждёт за ним
+	static constexpr real_t FLY_SEP_R = 0.9f; // Летящие ближе (центры) — расходятся
+	static constexpr real_t FLY_SEP_GAIN = 4.0f; // Скорость расхождения на метр глубины, 1/с
+	static constexpr real_t FLY_SEP_SPEED = 1.0f; // …не быстрее, м/с
 
 private:
 	enum LinkState {
@@ -300,6 +304,8 @@ private:
 	Ref<EnemyFlightFields> flight; // Поля сетки полёта пространства корабля (0); нет — полёта нет
 	EnemyGravityZones gzones;
 	int fly_count = 0; // Летящих за последний тик
+	LocalVector<Vector3> fly_pts; // Центры летящих на начало тика (мир) …
+	LocalVector<int> fly_h; // … и их ручки
 	uint64_t last_flight_usec = 0;
 
 	bool _valid(int p_h) const;
@@ -359,6 +365,7 @@ private:
 	void _land(Body &r_b, CharacterBody3D *p_body, uint64_t p_now);
 	void _tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
 	Vector3 _fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const;
+	Vector3 _fly_crowd(int p_h, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const;
 	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, real_t p_dt);
 	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);

@@ -68,12 +68,25 @@ bool EnemyBodies::zero_g_at(const Vector3 &p_world) {
 	return gzones.accel_at(p_world, g) && g.length_squared() < ZERO_G * ZERO_G;
 }
 
-// Цели полей этого тика: цели мозга летящих и тел без тяжести (взлетать ли — путь лётом) — центры, система корабля.
+// Начало тика полёта: центры летящих на начало тика (мир; очередь и расстояние между летящими — без порядка тел); цели
+// полей — цели мозга летящих и тел без тяжести (взлетать ли — путь лётом), центры в системе корабля.
 void EnemyBodies::_flight_targets(uint64_t p_now) {
 	const Space &sp = spaces[0];
+	fly_pts.clear();
+	fly_h.clear();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
 		const Body &b = bodies[h];
-		if (!b.used || b.dead || b.space != 0 || (b.move != MOVE_FLY && !b.zero_g) || b.point_set) {
+		if (!b.used || b.dead || b.space != 0) {
+			continue;
+		}
+		if (b.move == MOVE_FLY && !b.ragdoll) {
+			Node3D *n = Object::cast_to<Node3D>(ObjectDB::get_instance(b.body_id));
+			if (n != nullptr) {
+				fly_pts.push_back(n->get_global_position() + b.up * CENTER_H);
+				fly_h.push_back((int)h);
+			}
+		}
+		if ((b.move != MOVE_FLY && !b.zero_g) || b.point_set) {
 			continue;
 		}
 		const int ti = _player_index(b.target);
@@ -257,6 +270,30 @@ bool EnemyBodies::_in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const 
 	return _forward(p_b, p_fx).dot(dh.normalized()) >= Math::cos(Math::deg_to_rad(SECTOR_DEG));
 }
 
+// Очередь и расстояние лётом (центры летящих на начало тика): другой летящий ближе FLY_HOLD_R впереди по пути к цели и
+// ближе к ней — ждёт (r_hold); ближе FLY_SEP_R — скорость расхождения от него (FLY_SEP_GAIN на метр, не быстрее
+// FLY_SEP_SPEED).
+Vector3 EnemyBodies::_fly_crowd(int p_h, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const {
+	r_hold = false;
+	Vector3 sep;
+	const Vector3 to = p_goal - p_center;
+	const real_t my = to.length();
+	for (uint32_t i = 0; i < fly_pts.size(); i++) {
+		if (fly_h[i] == p_h) {
+			continue;
+		}
+		const Vector3 d = fly_pts[i] - p_center;
+		const real_t l = d.length();
+		if (l < FLY_SEP_R && l > 1e-4f) {
+			sep -= d * (MIN(FLY_SEP_GAIN * (FLY_SEP_R - l), FLY_SEP_SPEED) / l);
+		}
+		if (!r_hold && my > 1e-4f && l < FLY_HOLD_R && d.dot(to) > 0.5f * l * my && fly_pts[i].distance_to(p_goal) < my) {
+			r_hold = true;
+		}
+	}
+	return sep.limit_length(FLY_SEP_SPEED);
+}
+
 // Тик летящего тела: мозг тот же; ввод — к точке пути сетки (центр цели), у цели слабеет и снят ближе остановки; скорость
 // — закон полёта игрока плюс уступка игрокам; ближний ярус — move_and_slide в плавающем режиме, дальний — по клеткам;
 // взгляд — к цели, наклон — к её центру; визуалу — без шага (скорость вдоль торса 0).
@@ -267,6 +304,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 	const Vector3 pos = p_body->get_global_position();
 	const Vector3 center = pos + up * CENTER_H;
 	Vector3 input; // Мир, длина ≤ 1
+	Vector3 sep; // Расхождение с летящими (мир)
 	const bool fight = r_b.brain == BRAIN_CHASE || r_b.brain == BRAIN_WINDUP || r_b.brain == BRAIN_RECOVER;
 	Vector3 look = r_b.moving ? r_b.world - pos : r_b.face - pos; // Ноги к ногам = центр к центру
 	if (r_b.moving) {
@@ -282,7 +320,9 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			aim = sp.xf.xform(aim_l);
 		}
 		r_b.fly_dist = dist;
-		if (gd > stop) {
+		bool hold = false;
+		sep = _fly_crowd(p_h, center, goal, hold);
+		if (gd > stop && !hold) {
 			const Vector3 d = aim - center;
 			const real_t dl = d.length();
 			if (dl > 1e-4f) {
@@ -305,11 +345,14 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 	_update_tier(r_b, pos);
 	const real_t brake_hl = r_b.fly_brake_time < 0.0f ? -1.0f : _halflife(r_b.fly_brake_time);
 	Vector3 v = _free_step(p_body->get_velocity() - r_b.backoff, input, up, r_b.fly_speed, _halflife(r_b.fly_accel_time), brake_hl, p_dt);
-	const Vector3 push = _fly_backoff(r_b, pos, v);
+	const Vector3 push = _fly_backoff(r_b, pos, v) + sep;
 	r_b.backoff = push;
 	v += push;
 	if (r_b.tier == TIER_FAR) {
 		_fly_far(r_b, p_body, v, p_dt);
+	} else if (input.length_squared() < 1e-6f && v.length() < REST_SPEED && (p_now + (uint64_t)r_b.slot) % REST_CHECK_TICKS != 0) {
+		p_body->set_velocity(Vector3()); // Покой лётом: висит без move_and_slide (полный шаг — раз в REST_CHECK_TICKS)
+		rest_count++;
 	} else {
 		p_body->set_velocity(v);
 		p_body->move_and_slide();
