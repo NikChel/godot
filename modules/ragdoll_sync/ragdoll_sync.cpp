@@ -301,6 +301,23 @@ double RagdollSync::lag(int64_t p_id) const {
 	return i >= 0 ? ents[i].track.lag : -1.0;
 }
 
+int RagdollSync::track_space(int64_t p_id) const {
+	const int i = _find(p_id);
+	return i >= 0 ? ents[i].track.space : -1;
+}
+
+// Таз следующего по буферу в подвижном пространстве: цель кинематики тика — в позе запросов системы; позу после шага
+// системы ставит RagdollNet (ReferenceFrame.ride в конце тика).
+PackedInt64Array RagdollSync::following_in_spaces() const {
+	PackedInt64Array out;
+	for (const Ent &e : ents) {
+		if (!e.own && e.track.following && e.track.space > 0) {
+			out.push_back(e.id);
+		}
+	}
+	return out;
+}
+
 Vector3 RagdollSync::velocity(int64_t p_id, int p_tps) const {
 	const int i = _find(p_id);
 	return i >= 0 ? ents[i].track.velocity(p_tps) : Vector3();
@@ -361,6 +378,8 @@ void RagdollSync::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("following", "id"), &RagdollSync::following);
 	ClassDB::bind_method(D_METHOD("state", "id"), &RagdollSync::state);
 	ClassDB::bind_method(D_METHOD("lag", "id"), &RagdollSync::lag);
+	ClassDB::bind_method(D_METHOD("track_space", "id"), &RagdollSync::track_space);
+	ClassDB::bind_method(D_METHOD("following_in_spaces"), &RagdollSync::following_in_spaces);
 	ClassDB::bind_method(D_METHOD("velocity", "id", "tps"), &RagdollSync::velocity);
 	ClassDB::bind_method(D_METHOD("angular_velocity", "id", "tps"), &RagdollSync::angular_velocity);
 	ClassDB::bind_static_method("RagdollSync", D_METHOD("pack_pose", "key", "space", "xf"), &RagdollSync::pack_pose);

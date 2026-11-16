@@ -73,6 +73,8 @@ void RagdollPelvisTrack::reset() {
 	lag = -1.0;
 	catch_t = -1.0;
 	driven = false;
+	last_sp = -1;
+	prev_sp = -1;
 	final_t = -1.0;
 	rest_ticks = 0;
 }
@@ -106,25 +108,27 @@ bool RagdollPelvisTrack::tick(RigidBody3D *p_pelvis, double p_now, double p_one_
 		catch_t = 0.0;
 		catch_pending = true;
 	}
-	const Transform3D world = p_spaces.get(space) * sample(seek);
-	if (catch_t >= 0.0 && catch_pending) { // разница своей позы и буфера — в первый тик следования
-		const Transform3D cur = p_pelvis->get_global_transform();
-		catch_p = cur.origin - world.origin;
-		catch_q = (cur.basis.get_rotation_quaternion() * world.basis.get_rotation_quaternion().inverse()).normalized();
+	const Transform3D sx = p_spaces.get(space);
+	const Transform3D local = sample(seek);
+	if (catch_t >= 0.0 && catch_pending) { // разница своей позы и буфера — в первый тик следования (оси пространства)
+		const Transform3D cur = sx.affine_inverse() * p_pelvis->get_global_transform();
+		catch_p = cur.origin - local.origin;
+		catch_q = (cur.basis.get_rotation_quaternion() * local.basis.get_rotation_quaternion().inverse()).normalized();
 		if (catch_q.w < 0.0) {
 			catch_q = -catch_q;
 		}
 		catch_pending = false;
 	}
-	Transform3D to = world;
+	Transform3D to_l = local;
 	if (catch_t >= 0.0) {
 		const double k = 1.0 - Math::smoothstep(0.0, 1.0, catch_t / p_params.catchup_s);
-		to = Transform3D(Basis(Quaternion().slerp(catch_q, (real_t)k)) * world.basis, world.origin + catch_p * (real_t)k);
+		to_l = Transform3D(Basis(Quaternion().slerp(catch_q, (real_t)k)) * local.basis, local.origin + catch_p * (real_t)k);
 		catch_t += dt;
 		if (k <= 0.0) {
 			catch_t = -1.0;
 		}
 	}
+	const Transform3D to = sx * to_l;
 	resting = final_t >= 0.0 && seek >= final_t && catch_t < 0.0;
 	bool doze = false;
 	if (resting && !p_asleep) {
@@ -138,29 +142,49 @@ bool RagdollPelvisTrack::tick(RigidBody3D *p_pelvis, double p_now, double p_one_
 	}
 	if (driven && to.is_equal_approx(last)) {
 		prev = last; // скорость таза — 0 (release не толкнёт его старым шагом)
+		prev_l = last_l;
+		prev_sp = last_sp;
 		return doze; // таз стоит — тело не трогается (кукла засыпает)
 	}
 	prev = driven ? last : to;
+	prev_l = driven ? last_l : to_l;
+	prev_sp = driven ? last_sp : space;
 	last = to;
+	last_l = to_l;
+	last_sp = space;
+	last_sb = sx.basis;
 	driven = true;
 	p_pelvis->set_global_transform(to);
 	return doze;
 }
 
 Vector3 RagdollPelvisTrack::velocity(int p_tps) const {
-	return driven ? (last.origin - prev.origin) * (real_t)p_tps : Vector3();
+	if (!driven) {
+		return Vector3();
+	}
+	if (last_sp != prev_sp) {
+		return (last.origin - prev.origin) * (real_t)p_tps;
+	}
+	return last_sb.xform(last_l.origin - prev_l.origin) * (real_t)p_tps;
 }
 
 Vector3 RagdollPelvisTrack::angular_velocity(int p_tps) const {
 	if (!driven) {
 		return Vector3();
 	}
-	Quaternion q = (last.basis.get_rotation_quaternion() * prev.basis.get_rotation_quaternion().inverse()).normalized();
+	const bool same = last_sp == prev_sp;
+	const Transform3D &a_xf = same ? last_l : last;
+	const Transform3D &b_xf = same ? prev_l : prev;
+	Quaternion q = (a_xf.basis.get_rotation_quaternion() * b_xf.basis.get_rotation_quaternion().inverse()).normalized();
 	if (q.w < 0.0) {
 		q = -q;
 	}
 	const real_t a = q.get_angle();
-	return (double)a > 1e-6 ? q.get_axis() * a * (real_t)p_tps : Vector3();
+	if ((double)a <= 1e-6) {
+		return Vector3();
+	}
+	const Vector3 w = q.get_axis() * a * (real_t)p_tps;
+	return same ? last_sb.xform(w) : w;
 }
 
 Transform3D RagdollPelvisTrack::sample(double p_seek) const {

@@ -23,7 +23,8 @@ class RigidBody3D;
 //     только от владельца (зеркало владельцев RagdollNet — set_owner) и только следующим.
 // Сон куклы (asleep) — push из Ragdoll (set_asleep), тик его не спрашивает. Поза таза пишется узлу (RigidBody3D, как
 // прежде — кинематике цель шага физики уходит при сбросе преобразований дерева), заморозка при переходе ЖДУ → СЛЕДУЮ —
-// в тике в том же порядке.
+// в тике в том же порядке. Таз в подвижном пространстве (кабина турели) — в позе запросов системы этого тика; позу после
+// шага системы (цель кинематики к шагу физики) ставит RagdollNet по following_in_spaces.
 class RagdollSync : public RefCounted {
 	GDCLASS(RagdollSync, RefCounted);
 
@@ -103,6 +104,8 @@ public:
 	bool following(int64_t p_id) const;
 	int state(int64_t p_id) const;
 	double lag(int64_t p_id) const;
+	int track_space(int64_t p_id) const; // Пространство буфера следующего (−1 — нет точек)
+	PackedInt64Array following_in_spaces() const; // Следующие с тазом по буферу в подвижном пространстве (номер > 0)
 	Vector3 velocity(int64_t p_id, int p_tps) const;
 	Vector3 angular_velocity(int64_t p_id, int p_tps) const;
 

@@ -27,6 +27,9 @@ struct RagdollSpaceXforms {
 // тает за catchup_s (smoothstep), рывка нет. Неподвижный таз не трогается (is_equal_approx). Финальная поза владельца
 // показана — ФИНАЛ (resting): таз стоит в ней; кукла не уснула за rest_s — tick просит усыпить её; новая точка — снова
 // СЛЕДУЮ. Арифметика — как у GDScript: время и доли — double, позы — real_t.
+// Подвижное пространство (кабина турели): поза — пространства этого тика (поза запросов) × поза буфера; таяние разницы
+// и скорость таза (release) — в осях пространства: разница едет с системой, скорость — своя, относительно неё (её
+// везёт FrameRiders), а не с ходом системы за тик. На корабле — как прежде.
 struct RagdollPelvisTrack {
 	struct Params {
 		double buffer_s = 0.06; // ObjectStreamBufferV2.LATENCY_MS / 1000
@@ -44,12 +47,17 @@ struct RagdollPelvisTrack {
 	LocalVector<double> t; // Время точек на нашей шкале (NetClockOffset.now), по возрастанию
 	LocalVector<Transform3D> x; // Позы таза в системе пространства space
 	int space = -1;
-	Vector3 catch_p; // Разница своей позы и буфера в начале следования (мир)
+	Vector3 catch_p; // Разница своей позы и буфера в начале следования (оси пространства)
 	bool catch_pending = false; // Разница ещё не снята (у GDScript — catch_p = Vector3.INF)
-	Quaternion catch_q;
+	Quaternion catch_q; // … поворот (оси пространства)
 	double catch_t = -1.0; // Время таяния разницы (−1 — не тает)
-	Transform3D last; // Последняя поза, данная тазу
+	Transform3D last; // Последняя поза, данная тазу (мир)
 	Transform3D prev;
+	Transform3D last_l; // … в системе пространства своего тика
+	Transform3D prev_l;
+	Basis last_sb; // Оси пространства последней позы (мир)
+	int last_sp = -1; // Пространство последней / прошлой позы
+	int prev_sp = -1;
 	bool driven = false;
 	double final_t = -1.0; // Время финальной позы (последняя точка буфера), −1 — поток идёт
 	int rest_ticks = 0;
@@ -64,7 +72,8 @@ struct RagdollPelvisTrack {
 	// Физ-тик: true — финальная поза держится rest_s, а кукла не спит: усыпить.
 	bool tick(RigidBody3D *p_pelvis, double p_now, double p_one_way, double p_target, RagdollSpaceXforms &p_spaces,
 			bool p_asleep, int p_tps, const Params &p_params);
-	// Скорость таза по двум последним шагам кинематики (м/с, рад/с, мир).
+	// Скорость таза по двум последним шагам кинематики (м/с, рад/с, мировые оси позы пространства): в пространстве —
+	// своя, относительно него (позы одного пространства), иначе — по мировым позам.
 	Vector3 velocity(int p_tps) const;
 	Vector3 angular_velocity(int p_tps) const;
 
