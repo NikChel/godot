@@ -46,7 +46,7 @@ class EnemyReplicas : public RefCounted {
 
 public:
 	static constexpr int CAP = 16; // Точек (≈0.5 с при 30 Гц)
-	static constexpr int F = 7; // Чисел на точку: x, y, z, yaw, speed, step_lag, пространство
+	static constexpr int F = 9; // Чисел на точку: x, y, z, yaw, speed, step_lag, пространство, способ передвижения (EnemyBodies::Move), наклон взгляда
 	// Местная уступка: остаток добавки, который снимок не догоняет (тело хоста не отошло: стена), сходит к снимку с этим
 	// временем, с (≈ петля сети: за столько снимок догнал бы)
 	static constexpr real_t YIELD_RELAX_S = 0.25f;
@@ -76,6 +76,8 @@ private:
 		real_t yaw = 0.0f;
 		real_t speed = 0.0f;
 		real_t step_lag = 0.0f;
+		int move = 0; // Способ передвижения ближайшей по времени точки (EnemyBodies::Move)
+		real_t pitch = 0.0f; // Наклон взгляда к цели (прицел удара), рад
 		EnemyTumbler tumb;
 		bool ragdoll = false; // Лежит куклой (как EnemyBodies::Body::ragdoll)
 		Ref<EnemyRig> rig;
@@ -140,6 +142,9 @@ public:
 	int replica_space(int p_h) const;
 	real_t replica_speed(int p_h) const;
 	real_t replica_step_lag(int p_h) const;
+	int replica_move(int p_h) const; // EnemyBodies::Move снимка
+	real_t replica_pitch(int p_h) const;
+	Vector3 replica_aim(int p_h) const; // Прицел удара (мир): взгляд снимка с наклоном, позой пространства у этого пира
 	// Неваляшка (как EnemyBodies.body_set_tumbler / body_push; отброса у копии нет)
 	void replica_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_fall_angle, real_t p_down_angle, real_t p_height, real_t p_down_time, real_t p_rise_time, real_t p_stagger_angle, real_t p_knockback);
 	void replica_push(int p_h, const Vector3 &p_r, const Vector3 &p_j);
