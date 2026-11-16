@@ -541,7 +541,7 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	_priority_to_spaces(); // До первого запроса толпы в тике (_links_tick спрашивает count_near)
 	_links_tick(p_delta);
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
-	if (flight_grid.is_valid() && flight_grid->is_ready() && !spaces.is_empty()) {
+	if (flight.is_valid() && flight->is_ready() && !spaces.is_empty()) {
 		_flight_targets(now);
 	}
 	for (uint32_t h = 0; h < bodies.size(); h++) {
@@ -671,7 +671,7 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	}
 	r_b.fly_dist = -1.0f;
 	if (r_b.zero_g && r_b.moving && !r_b.point_set && _grid_ok(r_b)) {
-		r_b.fly_dist = flight_grid->field_dist((int64_t)r_b.target, spaces[0].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
+		r_b.fly_dist = flight->field_dist((int64_t)r_b.target, spaces[0].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
 	}
 	if (r_b.move == MOVE_WALK && _wants_fly(r_b, p_body, p_now)) {
 		_take_off(p_h, r_b, p_body);
@@ -1335,8 +1335,8 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_land_close"), &EnemyBodies::get_land_close);
 	ClassDB::bind_method(D_METHOD("get_closed_links"), &EnemyBodies::get_closed_links);
 	ClassDB::bind_method(D_METHOD("get_on_link_count"), &EnemyBodies::get_on_link_count);
-	ClassDB::bind_method(D_METHOD("set_flight_grid", "grid"), &EnemyBodies::set_flight_grid);
-	ClassDB::bind_method(D_METHOD("get_flight_grid"), &EnemyBodies::get_flight_grid);
+	ClassDB::bind_method(D_METHOD("set_flight", "fields"), &EnemyBodies::set_flight);
+	ClassDB::bind_method(D_METHOD("get_flight"), &EnemyBodies::get_flight);
 	ClassDB::bind_method(D_METHOD("set_gravity_zones", "areas"), &EnemyBodies::set_gravity_zones);
 	ClassDB::bind_method(D_METHOD("body_set_flight", "handle", "flight", "speed", "accel_time", "brake_time"), &EnemyBodies::body_set_flight);
 	ClassDB::bind_method(D_METHOD("flight_step", "budget_usec"), &EnemyBodies::flight_step);

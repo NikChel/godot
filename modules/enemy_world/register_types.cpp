@@ -1,6 +1,7 @@
 #include "register_types.h"
 
 #include "enemy_bodies.h"
+#include "enemy_flight_fields.h"
 #include "enemy_flight_grid.h"
 #include "enemy_replicas.h"
 #include "enemy_rig.h"
@@ -15,6 +16,7 @@ void initialize_enemy_world_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(EnemyWorld);
 		GDREGISTER_CLASS(EnemyViews);
 		GDREGISTER_CLASS(EnemyFlightGrid);
+		GDREGISTER_CLASS(EnemyFlightFields);
 		GDREGISTER_CLASS(EnemyBodies);
 		GDREGISTER_CLASS(EnemyReplicas);
 		GDREGISTER_CLASS(EnemyRig);

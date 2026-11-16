@@ -2,7 +2,7 @@
 
 #include "enemy_anim.h"
 #include "enemy_arms.h"
-#include "enemy_flight_grid.h"
+#include "enemy_flight_fields.h"
 #include "enemy_gravity_zones.h"
 #include "enemy_links.h"
 #include "enemy_rig.h"
@@ -59,10 +59,10 @@ class Node3D;
 // Полёт (бриф 2026-11-14, срез 1; enemy_bodies_flight.cpp): способ передвижения тела — ИДЁТ (как выше) / ЛЕТИТ; кукла —
 // неваляшка и body_set_ragdoll, как у ходящих. Тяжесть в центре тела — зоны карты (set_gravity_zones); без тяжести в
 // пространстве корабля тело взлетает, когда пешком хуже: оторвано от пола дольше AIRBORNE_S, конец пешего пути дальше
-// FOOT_GAP от цели или лётом в FLY_GAIN раз короче (поле сетки полёта set_flight_grid); тяжесть вернулась — снова ИДЁТ
+// FOOT_GAP от цели или лётом в FLY_GAIN раз короче (поле сетки полёта set_flight); тяжесть вернулась — снова ИДЁТ
 // (падает телом, ближний ярус до пола). Профиль FLIGHT_ALWAYS — летает всегда (следующий срез). Летящее тело — вне толпы
 // (агент снят, вернётся на посадке); мозг тот же; скорость — закон игрока в невесомости (PlayerFreeMove: разгон, торможение,
-// вверх / вниз отдельно; числа — body_set_flight); направление — путь сетки (EnemyFlightGrid.steer) к центру цели;
+// вверх / вниз отдельно; числа — body_set_flight); направление — путь по полю сетки (EnemyFlightFields.steer) к центру цели;
 // ближний ярус — CharacterBody3D в плавающем режиме (move_and_slide), дальний — без физики по свободным клеткам. Досягаемость
 // и прицел удара (body_aim: взгляд с наклоном к центру цели) — объёмные; уступка игрокам — то же правило по капсулам по
 // верху тела. Пересчёт полей — flight_step с бюджетом (отдельно от тика).
@@ -297,7 +297,7 @@ private:
 	int on_link = 0;
 	int portal_transits = 0;
 	// Полёт
-	Ref<EnemyFlightGrid> flight_grid; // Сетка полёта пространства корабля (0); нет — полёта нет
+	Ref<EnemyFlightFields> flight; // Поля сетки полёта пространства корабля (0); нет — полёта нет
 	EnemyGravityZones gzones;
 	int fly_count = 0; // Летящих за последний тик
 	uint64_t last_flight_usec = 0;
@@ -448,11 +448,11 @@ public:
 	void body_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
 	Vector3 body_backoff(int p_h) const;
 	bool body_ghost(int p_h) const;
-	// Полёт: сетка пространства корабля; зоны тяжести карты (Area3D GravityZone; список — при его смене); числа тела
+	// Полёт: поля сетки пространства корабля; зоны тяжести карты (Area3D GravityZone; список — при его смене); числа тела
 	// (Flight, скорость, времена разгона и торможения до 95%); пересчёт полей по бюджету (после tick); тяжесть точки;
 	// способ передвижения, прицел удара (мир: взгляд с наклоном к цели), путь лётом, счётчики (пробы)
-	void set_flight_grid(const Ref<EnemyFlightGrid> &p_grid) { flight_grid = p_grid; }
-	Ref<EnemyFlightGrid> get_flight_grid() const { return flight_grid; }
+	void set_flight(const Ref<EnemyFlightFields> &p_fields) { flight = p_fields; }
+	Ref<EnemyFlightFields> get_flight() const { return flight; }
 	void set_gravity_zones(const Array &p_areas) { gzones.set(p_areas); }
 	void body_set_flight(int p_h, int p_flight, real_t p_speed, real_t p_accel_time, real_t p_brake_time);
 	void flight_step(int p_budget_usec);
