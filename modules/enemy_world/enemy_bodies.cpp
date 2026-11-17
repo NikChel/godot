@@ -1080,10 +1080,13 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 				r_b.moving = false;
 				return;
 			}
+			// Подлёт по пути сетки, пока дальше желаемой или не видна; ближе с видимостью — останавливается, прицел — когда
+			// встал (ход до прицела не уводит за укрытие)
+			const bool stop = !r_b.too_close && r_b.seen && d <= r_b.fire_want;
 			r_b.away = r_b.too_close;
-			r_b.moving = !r_b.too_close; // Подлёт по пути сетки: пока дальше желаемой или не видна
+			r_b.moving = !r_b.too_close && !stop;
 			r_b.stop_dist = r_b.seen ? r_b.fire_want : r_b.fire_min;
-			if (!r_b.too_close && r_b.seen && d <= r_b.fire_want) {
+			if (stop && p_body->get_velocity().length() < STILL_SPEED) {
 				r_b.seen = _sees(r_b, p_body, p_ti);
 				if (r_b.seen) {
 					windup();
@@ -1108,8 +1111,12 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 				r_b.away = false;
 				break;
 			}
+			const bool band = !r_b.too_close && d >= r_b.fire_min && d <= r_b.fire_max;
+			if (band && r_b.seen && p_body->get_velocity().length() >= STILL_SPEED) {
+				break; // В полосе с видимостью ещё тормозит — прицел, когда встанет
+			}
 			r_b.brain = BRAIN_CHASE;
-			if (!r_b.too_close && d >= r_b.fire_min && d <= r_b.fire_max) {
+			if (band) {
 				r_b.seen = _sees(r_b, p_body, p_ti);
 				if (r_b.seen) {
 					windup(); // В полосе огня с видимостью — снова прицел
