@@ -60,12 +60,22 @@ class Node3D;
 // неваляшка и body_set_ragdoll, как у ходящих. Тяжесть в центре тела — зоны карты (set_gravity_zones); без тяжести в
 // пространстве корабля тело взлетает, когда пешком хуже: оторвано от пола дольше AIRBORNE_S, конец пешего пути дальше
 // FOOT_GAP от цели или лётом в FLY_GAIN раз короче (поле сетки полёта set_flight); тяжесть вернулась — снова ИДЁТ
-// (падает телом, ближний ярус до пола). Профиль FLIGHT_ALWAYS — летает всегда (следующий срез). Летящее тело — вне толпы
+// (падает телом, ближний ярус до пола). Профиль FLIGHT_ALWAYS — летает всегда (коптер, ниже). Летящее тело — вне толпы
 // (агент снят, вернётся на посадке); мозг тот же; скорость — закон игрока в невесомости (PlayerFreeMove: разгон, торможение,
 // вверх / вниз отдельно; числа — body_set_flight); направление — путь по полю сетки (EnemyFlightFields.steer) к центру цели;
 // ближний ярус — CharacterBody3D в плавающем режиме (move_and_slide), дальний — без физики по свободным клеткам. Досягаемость
 // и прицел удара (body_aim: взгляд с наклоном к центру цели) — объёмные; уступка игрокам — то же правило по капсулам по
 // верху тела. Пересчёт полей — flight_step с бюджетом (отдельно от тика).
+// Коптер (бриф 2026-11-17, шаг 2; enemy_bodies_flight.cpp): профиль FLIGHT_ALWAYS — летит с первого тика и никогда не
+// садится; без сетки полёта (не готова, пространство не корабль) висит на месте (мозг тот же, без хода). С тяжестью —
+// рабочая высота (body_set_hover): центр над полом под собой (лучи вниз / вверх по слою мира), под потолком — как
+// помещается; вверх не быстрее набора; ход по пути сетки — вертикаль пути (проход важнее высоты), висит и отходит — к
+// высоте. Атака (body_set_attack; числа по умолчанию — ближний бой ходока: WINDUP_S, RECOVER_S, один удар): замах →
+// удары очереди (shots через shot_gap) → восстановление. Дальний бой (дальность > 0): цель — центр к центру; видимость —
+// луч физики по слою мира от центра к центру цели (раз в SEE_TICKS и в моменты решения); CHASE — подлёт, пока дальше
+// желаемой или не видна, иначе прицел (WINDUP: клип действия — на первом выстреле очереди); RECOVER — отход ближе
+// минимальной (до неё + FIRE_BACK_GAP, лётом, без пути), подлёт дальше максимальной или не видна, иначе висит; в конце —
+// снова прицел в полосе огня с видимостью, иначе CHASE. Прицел и очередь доводятся до конца; оглушение сбивает их.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -164,6 +174,14 @@ public:
 	static constexpr real_t FLY_SEP_R = 0.9f; // Летящие ближе (центры) — расходятся
 	static constexpr real_t FLY_SEP_GAIN = 4.0f; // Скорость расхождения на метр глубины, 1/с
 	static constexpr real_t FLY_SEP_SPEED = 1.0f; // …не быстрее, м/с
+	// Рабочая высота (полёт с тяжестью)
+	static constexpr real_t HOVER_S = 0.5f; // Скорость к рабочей высоте — разница высот за столько, с
+	static constexpr real_t HOVER_PROBE = 8.0f; // Лучи пола и потолка от центра тела, м (пола нет — высоту не держит)
+	static constexpr real_t CEIL_GAP = 0.5f; // Центр тела ниже потолка не меньше, м
+	static constexpr uint64_t HOVER_RAY_TICKS = 3; // Лучи пола и потолка раз в столько тиков (сдвиг по слоту)
+	// Дальний бой
+	static constexpr uint64_t SEE_TICKS = 6; // Луч видимости цели раз в столько тиков (сдвиг по слоту) и в моменты решения
+	static constexpr real_t FIRE_BACK_GAP = 1.0f; // Отход: до минимальной дальности плюс столько, м
 
 private:
 	enum LinkState {
@@ -219,6 +237,19 @@ private:
 		uint64_t state_end = 0;
 		int strikes = 0;
 		int hits = 0;
+		// Атака (body_set_attack): замах, восстановление, удары очереди и промежуток, дальность огня (0 — ближний бой)
+		real_t windup_s = WINDUP_S;
+		real_t recover_s = RECOVER_S;
+		int shots = 1;
+		real_t shot_gap_s = 0.13f;
+		real_t fire_min = 0.0f;
+		real_t fire_want = 0.0f;
+		real_t fire_max = 0.0f;
+		int shots_left = 0; // Ударов очереди осталось (WINDUP)
+		bool too_close = false; // Дальний бой: цель ближе fire_min (снимается дальше fire_min + FIRE_BACK_GAP)
+		bool away = false; // …и тело отлетает от неё в этом тике (не в прицеле и очереди)
+		bool seen = false; // Цель видна (луч по слою мира, последний)
+		ObjectID seen_id; // …для этой цели
 		// Запрос пути (EVENT_PATH)
 		Vector3 path_from;
 		Vector3 goal;
@@ -274,6 +305,13 @@ private:
 		bool landing = false;
 		int take_offs = 0; // Взлётов / посадок всего (пробы)
 		int landings = 0;
+		real_t hover_h = 0.0f; // Рабочая высота центра над полом (body_set_hover), м; 0 — не держит
+		real_t climb_speed = -1.0f; // Набор вверх с тяжестью, м/с; < 0 — скорость полёта
+		real_t floor_y = 0.0f; // Пол и потолок над / под центром (последние лучи; высоты — вдоль верха в системе тела)
+		real_t ceil_y = 0.0f;
+		bool floor_hit = false;
+		bool ceil_hit = false;
+		bool rays_known = false;
 	};
 
 	LocalVector<Body> bodies;
@@ -341,6 +379,10 @@ private:
 	int _pick(const Vector3 &p_pos) const;
 	bool _in_reach(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	void _brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
+	void _brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p_ti, uint64_t p_now);
+	void _strike_tick(int p_h, Body &r_b, uint64_t p_now);
+	bool _sees(const Body &p_b, CharacterBody3D *p_body, int p_ti) const;
+	real_t _fire_dist(const Body &p_b, CharacterBody3D *p_body, int p_ti) const;
 	static uint64_t _ticks(real_t p_s);
 	// Движение
 	void _update_tier(Body &r_b, const Vector3 &p_pos);
@@ -366,9 +408,10 @@ private:
 	void _tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
 	Vector3 _fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const;
 	Vector3 _fly_crowd(int p_h, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const;
-	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, real_t p_dt);
+	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, bool p_free_up, real_t p_dt);
 	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);
+	real_t _hover_lift(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
 	static real_t _halflife(real_t p_time);
 	static Vector3 _aim(const Body &p_b, const Transform3D &p_fx);
 
@@ -471,6 +514,13 @@ public:
 	Vector3i body_flight_stats(int p_h) const; // x — взлётов, y — посадок, z — без тяжести сейчас (1 / 0)
 	int get_fly_count() const { return fly_count; }
 	int64_t get_last_flight_usec() const { return (int64_t)last_flight_usec; }
+	// Коптер: рабочая высота центра над полом (м; 0 — не держит) и набор вверх (м/с; < 0 — скорость полёта) — полёт с
+	// тяжестью; атака: замах, восстановление (с), удары очереди и промежуток (с), дальность огня мин. / желаемая / макс.
+	// (м, центр к центру; макс. 0 — ближний бой); видит ли цель, отходит ли (пробы)
+	void body_set_hover(int p_h, real_t p_height, real_t p_climb_speed);
+	void body_set_attack(int p_h, real_t p_windup_time, real_t p_recover_time, int p_shots, real_t p_shot_interval, real_t p_range_min, real_t p_range_want, real_t p_range_max);
+	bool body_sees(int p_h) const;
+	bool body_away(int p_h) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);

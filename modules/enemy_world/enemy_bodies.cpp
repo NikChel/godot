@@ -275,6 +275,28 @@ void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, con
 	}
 }
 
+void EnemyBodies::body_set_attack(int p_h, real_t p_windup_time, real_t p_recover_time, int p_shots, real_t p_shot_interval, real_t p_range_min, real_t p_range_want, real_t p_range_max) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Body &b = bodies[p_h];
+	b.windup_s = MAX(p_windup_time, 0.0f);
+	b.recover_s = MAX(p_recover_time, 0.0f);
+	b.shots = MAX(p_shots, 1);
+	b.shot_gap_s = MAX(p_shot_interval, 0.0f);
+	b.fire_max = MAX(p_range_max, 0.0f);
+	b.fire_min = CLAMP(p_range_min, 0.0f, b.fire_max);
+	b.fire_want = CLAMP(p_range_want, b.fire_min, b.fire_max);
+}
+
+bool EnemyBodies::body_sees(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	return bodies[p_h].seen;
+}
+
+bool EnemyBodies::body_away(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), false);
+	return bodies[p_h].away;
+}
+
 void EnemyBodies::body_add_hits(int p_h, int p_hits) {
 	ERR_FAIL_COND(!_valid(p_h));
 	bodies[p_h].hits += p_hits;
@@ -541,8 +563,8 @@ PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	_priority_to_spaces(); // До первого запроса толпы в тике (_links_tick спрашивает count_near)
 	_links_tick(p_delta);
 	const uint64_t now = Engine::get_singleton()->get_physics_frames();
-	if (flight.is_valid() && flight->is_ready() && !spaces.is_empty()) {
-		_flight_targets(now);
+	if (!spaces.is_empty()) {
+		_flight_targets(now); // Центры летящих — всегда (висят и без сетки); цели полей — при готовой сетке
 	}
 	for (uint32_t h = 0; h < bodies.size(); h++) {
 		Body &b = bodies[h];
@@ -588,8 +610,11 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 		return;
 	}
 	_zone_tick(r_b, p_body);
-	if (r_b.move == MOVE_FLY) { // Летит (enemy_bodies_flight.cpp); тяжесть вернулась — садится и идёт
-		if (_grid_ok(r_b) && (r_b.flight == FLIGHT_ALWAYS || r_b.zero_g)) {
+	if (r_b.move == MOVE_WALK && r_b.flight == FLIGHT_ALWAYS && !r_b.ragdoll) {
+		_take_off(p_h, r_b, p_body); // Летает всегда — с первого тика, и без сетки (висит до неё)
+	}
+	if (r_b.move == MOVE_FLY) { // Летит (enemy_bodies_flight.cpp); тяжесть вернулась — садится и идёт (летает всегда — нет)
+		if (r_b.flight == FLIGHT_ALWAYS || (_grid_ok(r_b) && r_b.zero_g)) {
 			_tick_fly(p_h, r_b, p_body, fx, p_now, p_dt);
 			return;
 		}
@@ -922,7 +947,8 @@ uint64_t EnemyBodies::_ticks(real_t p_s) {
 }
 
 void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now) {
-	if (r_b.tumb.staggered() || p_now < r_b.rise_end) { // Оглушён (или встаёт куклой): замах сбит, стоит (и у точки пробы)
+	r_b.away = false;
+	if (r_b.tumb.staggered() || p_now < r_b.rise_end) { // Оглушён (или встаёт куклой): замах и очередь сбиты, стоит (и у точки пробы)
 		r_b.brain = BRAIN_STAGGER;
 		r_b.moving = false;
 		return;
@@ -943,6 +969,10 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 		ti = _pick(p_body->get_global_position());
 		r_b.target = ti >= 0 ? players_id[ti] : ObjectID();
 	}
+	if (r_b.fire_max > 0.0f) {
+		_brain_fire(p_h, r_b, p_body, ti, p_now); // Дальний бой
+		return;
+	}
 	switch (r_b.brain) {
 		case BRAIN_IDLE: {
 			r_b.moving = false;
@@ -961,9 +991,10 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 			r_b.stop_dist = STRIKE_STOP;
 			if (_in_reach(r_b, p_body, p_fx, players_pos[ti])) {
 				r_b.brain = BRAIN_WINDUP;
-				r_b.state_end = p_now + _ticks(WINDUP_S);
+				r_b.state_end = p_now + _ticks(r_b.windup_s);
+				r_b.shots_left = MAX(r_b.shots, 1);
 				r_b.moving = false;
-				_emit(EVENT_ACTION, p_h);
+				_emit(EVENT_ACTION, p_h); // Ближний бой: клип замаха — с начала замаха
 			}
 		} break;
 		case BRAIN_WINDUP: {
@@ -971,12 +1002,7 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 			if (ti >= 0) {
 				r_b.face = players_pos[ti];
 			}
-			if (p_now >= r_b.state_end) {
-				r_b.strikes++;
-				_emit(EVENT_STRIKE, p_h);
-				r_b.brain = BRAIN_RECOVER;
-				r_b.state_end = p_now + _ticks(RECOVER_S);
-			}
+			_strike_tick(p_h, r_b, p_now);
 		} break;
 		case BRAIN_RECOVER: {
 			r_b.moving = false;
@@ -988,6 +1014,126 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 			}
 		} break;
 	}
+}
+
+// Конец замаха и очереди: удар (EVENT_STRIKE; дальний бой — первый выстрел очереди с клипом действия); ещё есть — следующий
+// через shot_gap_s, нет — восстановление recover_s.
+void EnemyBodies::_strike_tick(int p_h, Body &r_b, uint64_t p_now) {
+	if (p_now < r_b.state_end) {
+		return;
+	}
+	if (r_b.fire_max > 0.0f && r_b.shots_left >= MAX(r_b.shots, 1)) {
+		_emit(EVENT_ACTION, p_h);
+	}
+	r_b.strikes++;
+	_emit(EVENT_STRIKE, p_h);
+	r_b.shots_left--;
+	if (r_b.shots_left > 0) {
+		r_b.state_end = p_now + MAX(_ticks(r_b.shot_gap_s), (uint64_t)1);
+		return;
+	}
+	r_b.brain = BRAIN_RECOVER;
+	r_b.state_end = p_now + _ticks(r_b.recover_s);
+}
+
+// Дальний бой (заголовок): дальность — центр к центру; видимость — луч раз в SEE_TICKS (новая цель — сразу) и свежий
+// в момент решения «прицел»; цель ближе fire_min — отход (до fire_min + FIRE_BACK_GAP), кроме прицела и очереди.
+void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p_ti, uint64_t p_now) {
+	const bool has = p_ti >= 0;
+	real_t d = 0.0f;
+	if (has) {
+		r_b.world = players_pos[p_ti];
+		r_b.face = players_pos[p_ti];
+		if (r_b.seen_id != r_b.target || (p_now + (uint64_t)r_b.slot) % SEE_TICKS == 0) {
+			r_b.seen = _sees(r_b, p_body, p_ti);
+			r_b.seen_id = r_b.target;
+		}
+		d = _fire_dist(r_b, p_body, p_ti);
+		if (d < r_b.fire_min) {
+			r_b.too_close = true;
+		} else if (d > r_b.fire_min + FIRE_BACK_GAP) {
+			r_b.too_close = false;
+		}
+	} else {
+		r_b.too_close = false;
+		r_b.seen = false;
+		r_b.seen_id = ObjectID();
+	}
+	// Прицел: висит, лицом и наклоном к цели; очередь — первый выстрел в конце прицела
+	auto windup = [&]() {
+		r_b.brain = BRAIN_WINDUP;
+		r_b.state_end = p_now + _ticks(r_b.windup_s);
+		r_b.shots_left = MAX(r_b.shots, 1);
+		r_b.moving = false;
+		r_b.away = false;
+	};
+	switch (r_b.brain) {
+		case BRAIN_IDLE: {
+			r_b.moving = false;
+			if (has) {
+				r_b.brain = BRAIN_CHASE;
+			}
+		} break;
+		case BRAIN_CHASE: {
+			if (!has) {
+				r_b.brain = BRAIN_IDLE;
+				r_b.moving = false;
+				return;
+			}
+			r_b.away = r_b.too_close;
+			r_b.moving = !r_b.too_close; // Подлёт по пути сетки: пока дальше желаемой или не видна
+			r_b.stop_dist = r_b.seen ? r_b.fire_want : r_b.fire_min;
+			if (!r_b.too_close && r_b.seen && d <= r_b.fire_want) {
+				r_b.seen = _sees(r_b, p_body, p_ti);
+				if (r_b.seen) {
+					windup();
+				}
+			}
+		} break;
+		case BRAIN_WINDUP: {
+			r_b.moving = false;
+			_strike_tick(p_h, r_b, p_now);
+		} break;
+		case BRAIN_RECOVER: {
+			// Перезарядка: ближе минимальной — отход; дальше максимальной или не видна — подлёт; иначе висит
+			r_b.away = has && r_b.too_close;
+			r_b.moving = has && !r_b.too_close && (!r_b.seen || d > r_b.fire_max);
+			r_b.stop_dist = r_b.seen ? r_b.fire_max : r_b.fire_min;
+			if (p_now < r_b.state_end) {
+				break;
+			}
+			if (!has) {
+				r_b.brain = BRAIN_IDLE;
+				r_b.moving = false;
+				r_b.away = false;
+				break;
+			}
+			r_b.brain = BRAIN_CHASE;
+			if (!r_b.too_close && d >= r_b.fire_min && d <= r_b.fire_max) {
+				r_b.seen = _sees(r_b, p_body, p_ti);
+				if (r_b.seen) {
+					windup(); // В полосе огня с видимостью — снова прицел
+				}
+			}
+		} break;
+	}
+}
+
+// Цель видна: луч по слою мира от центра тела к центру цели.
+bool EnemyBodies::_sees(const Body &p_b, CharacterBody3D *p_body, int p_ti) const {
+	PhysicsDirectSpaceState3D::RayParameters rq;
+	rq.from = p_body->get_global_position() + p_b.up * CENTER_H;
+	rq.to = players_pos[p_ti] + p_b.up * CENTER_H;
+	rq.collision_mask = FLOOR_LAYER;
+	rq.exclude.insert(p_body->get_rid());
+	PhysicsDirectSpaceState3D::RayResult hit;
+	return !p_body->get_world_3d()->get_direct_space_state()->intersect_ray(rq, hit);
+}
+
+// Дальность огня: центр тела к центру цели (= ноги к ногам).
+real_t EnemyBodies::_fire_dist(const Body &p_b, CharacterBody3D *p_body, int p_ti) const {
+	(void)p_b;
+	return players_pos[p_ti].distance_to(p_body->get_global_position());
 }
 
 // --- Движение ---
@@ -1348,6 +1494,10 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_flight_stats", "handle"), &EnemyBodies::body_flight_stats);
 	ClassDB::bind_method(D_METHOD("get_fly_count"), &EnemyBodies::get_fly_count);
 	ClassDB::bind_method(D_METHOD("get_last_flight_usec"), &EnemyBodies::get_last_flight_usec);
+	ClassDB::bind_method(D_METHOD("body_set_hover", "handle", "height", "climb_speed"), &EnemyBodies::body_set_hover);
+	ClassDB::bind_method(D_METHOD("body_set_attack", "handle", "windup_time", "recover_time", "shots", "shot_interval", "range_min", "range_want", "range_max"), &EnemyBodies::body_set_attack);
+	ClassDB::bind_method(D_METHOD("body_sees", "handle"), &EnemyBodies::body_sees);
+	ClassDB::bind_method(D_METHOD("body_away", "handle"), &EnemyBodies::body_away);
 
 	BIND_ENUM_CONSTANT(BRAIN_IDLE);
 	BIND_ENUM_CONSTANT(BRAIN_CHASE);
