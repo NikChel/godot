@@ -21,58 +21,28 @@ bool EnemyRig::build(Node3D *p_root, Skeleton3D *p_skeleton, AnimationPlayer *p_
 	rest.resize(n);
 	rest_rot.resize(n);
 	has_pos.resize(n);
+	anim_bone.resize(n);
 	for (int b = 0; b < n; b++) {
 		parent[b] = p_skeleton->get_bone_parent(b);
 		rest[b] = p_skeleton->get_bone_rest(b);
 		rest_rot[b] = rest[b].basis.get_rotation_quaternion();
 		has_pos[b] = 0;
-	}
-	LocalVector<uint8_t> anim_bone;
-	anim_bone.resize(n);
-	for (int b = 0; b < n; b++) {
 		anim_bone[b] = 0;
 	}
+	lean_rot.clear();
+	lean_pos.clear();
+	lean_has.clear();
+	lean_w = 0.0f;
+	spin_bone.clear();
+	spin_rate.clear();
 
 	clips.clear();
 	clip_index.clear();
 	for (int i = 0; i < p_clips.size(); i++) {
 		const StringName name = p_clips[i];
-		ERR_FAIL_COND_V_MSG(!p_player->has_animation(name), false, vformat("EnemyRig: no clip %s.", name));
 		Clip c;
-		c.name = name;
-		c.anim = p_player->get_animation(name);
-		c.length = (real_t)c.anim->get_length();
-		c.loop = c.anim->get_loop_mode() != Animation::LOOP_NONE;
-		c.rot.resize(n);
-		c.pos.resize(n);
-		for (int b = 0; b < n; b++) {
-			c.rot[b] = -1;
-			c.pos[b] = -1;
-		}
-		for (int t = 0; t < c.anim->get_track_count(); t++) {
-			const Animation::TrackType type = c.anim->track_get_type(t);
-			if ((type != Animation::TYPE_ROTATION_3D && type != Animation::TYPE_POSITION_3D) || !c.anim->track_is_enabled(t)) {
-				continue;
-			}
-			const NodePath path = c.anim->track_get_path(t);
-			if (path.get_subname_count() != 1) {
-				continue;
-			}
-			Node *target = anim_root->get_node_or_null(NodePath(path.get_names(), path.is_absolute()));
-			if (target != p_skeleton) {
-				continue;
-			}
-			const int b = p_skeleton->find_bone(path.get_subname(0));
-			if (b < 0) {
-				continue;
-			}
-			anim_bone[b] = 1;
-			if (type == Animation::TYPE_ROTATION_3D) {
-				c.rot[b] = t;
-			} else {
-				c.pos[b] = t;
-				has_pos[b] = 1;
-			}
+		if (!_load_clip(anim_root, p_skeleton, p_player, name, c)) {
+			return false;
 		}
 		clip_index[name] = (int)clips.size();
 		clips.push_back(c);
@@ -91,14 +61,123 @@ bool EnemyRig::build(Node3D *p_root, Skeleton3D *p_skeleton, AnimationPlayer *p_
 		ERR_FAIL_COND_V_MSG(!through_upper, false, "EnemyRig: fore bone is not below the upper bone.");
 		anim_bone[upper[s]] = 1;
 	}
-	written.clear();
-	for (int b = 0; b < n; b++) {
-		if (anim_bone[b]) {
-			written.push_back(b);
-		}
-	}
+	_rebuild_written();
 	skel_xf = p_root->get_global_transform().affine_inverse() * p_skeleton->get_global_transform();
 	built = true;
+	return true;
+}
+
+// Клип p_name из p_player: дорожки поворота и позиции костей p_skeleton (их кости — в anim_bone / has_pos).
+bool EnemyRig::_load_clip(Node *p_anim_root, Skeleton3D *p_skeleton, AnimationPlayer *p_player, const StringName &p_name, Clip &r_clip) {
+	ERR_FAIL_COND_V_MSG(!p_player->has_animation(p_name), false, vformat("EnemyRig: no clip %s.", p_name));
+	const int n = (int)parent.size();
+	r_clip.name = p_name;
+	r_clip.anim = p_player->get_animation(p_name);
+	r_clip.length = (real_t)r_clip.anim->get_length();
+	r_clip.loop = r_clip.anim->get_loop_mode() != Animation::LOOP_NONE;
+	r_clip.rot.resize(n);
+	r_clip.pos.resize(n);
+	for (int b = 0; b < n; b++) {
+		r_clip.rot[b] = -1;
+		r_clip.pos[b] = -1;
+	}
+	for (int t = 0; t < r_clip.anim->get_track_count(); t++) {
+		const Animation::TrackType type = r_clip.anim->track_get_type(t);
+		if ((type != Animation::TYPE_ROTATION_3D && type != Animation::TYPE_POSITION_3D) || !r_clip.anim->track_is_enabled(t)) {
+			continue;
+		}
+		const NodePath path = r_clip.anim->track_get_path(t);
+		if (path.get_subname_count() != 1) {
+			continue;
+		}
+		Node *target = p_anim_root->get_node_or_null(NodePath(path.get_names(), path.is_absolute()));
+		if (target != p_skeleton) {
+			continue;
+		}
+		const int b = p_skeleton->find_bone(path.get_subname(0));
+		if (b < 0) {
+			continue;
+		}
+		anim_bone[b] = 1;
+		if (type == Animation::TYPE_ROTATION_3D) {
+			r_clip.rot[b] = t;
+		} else {
+			r_clip.pos[b] = t;
+			has_pos[b] = 1;
+		}
+	}
+	return true;
+}
+
+void EnemyRig::_rebuild_written() {
+	written.clear();
+	for (uint32_t b = 0; b < anim_bone.size(); b++) {
+		if (anim_bone[b]) {
+			written.push_back((int)b);
+		}
+	}
+}
+
+bool EnemyRig::set_lean(Skeleton3D *p_skeleton, AnimationPlayer *p_player, const PackedStringArray &p_clips, real_t p_time) {
+	ERR_FAIL_COND_V_MSG(!built, false, "EnemyRig: set_lean after build.");
+	ERR_FAIL_NULL_V(p_skeleton, false);
+	ERR_FAIL_NULL_V(p_player, false);
+	ERR_FAIL_COND_V_MSG(p_clips.size() != LEANS, false, "EnemyRig: lean clips — forward, back, left, right.");
+	ERR_FAIL_COND_V_MSG(p_skeleton->get_bone_count() != (int)parent.size(), false, "EnemyRig: lean — not the rig's skeleton.");
+	Node *anim_root = p_player->get_node_or_null(p_player->get_root_node());
+	ERR_FAIL_NULL_V_MSG(anim_root, false, "EnemyRig: AnimationPlayer root node not found.");
+	const int n = (int)parent.size();
+	lean_rot.resize(LEANS * n);
+	lean_pos.resize(LEANS * n);
+	lean_has.resize(LEANS * n);
+	for (int i = 0; i < LEANS; i++) {
+		Clip c;
+		if (!_load_clip(anim_root, p_skeleton, p_player, p_clips[i], c)) {
+			lean_rot.clear();
+			lean_pos.clear();
+			lean_has.clear();
+			lean_w = 0.0f;
+			return false;
+		}
+		for (int b = 0; b < n; b++) {
+			const int k = i * n + b;
+			lean_has[k] = (c.rot[b] >= 0 || c.pos[b] >= 0) ? 1 : 0;
+			lean_rot[k] = Quaternion();
+			lean_pos[k] = Vector3();
+			if (!lean_has[k]) {
+				continue;
+			}
+			Quaternion q0; // Клип стойки, начало
+			Vector3 p0;
+			_clip_pose(clips[0], 0.0f, b, q0, p0);
+			Quaternion q;
+			Vector3 p;
+			_clip_pose(c, 0.0f, b, q, p);
+			lean_rot[k] = (q0.inverse() * q).normalized();
+			lean_pos[k] = p - p0;
+		}
+	}
+	lean_w = LEAN_95 / MAX(p_time, (real_t)0.01f);
+	_rebuild_written();
+	return true;
+}
+
+bool EnemyRig::set_spin(Skeleton3D *p_skeleton, const PackedStringArray &p_bones, const Vector3 &p_axis, const PackedFloat32Array &p_rates) {
+	ERR_FAIL_COND_V_MSG(!built, false, "EnemyRig: set_spin after build.");
+	ERR_FAIL_NULL_V(p_skeleton, false);
+	ERR_FAIL_COND_V_MSG(p_bones.size() != p_rates.size(), false, "EnemyRig: spin — one rate per bone.");
+	ERR_FAIL_COND_V_MSG(p_axis.length_squared() < 1e-8f, false, "EnemyRig: spin axis is zero.");
+	spin_bone.clear();
+	spin_rate.clear();
+	for (int i = 0; i < p_bones.size(); i++) {
+		const int b = p_skeleton->find_bone(p_bones[i]);
+		ERR_FAIL_COND_V_MSG(b < 0 || b >= (int)parent.size(), false, vformat("EnemyRig: no spin bone %s.", p_bones[i]));
+		spin_bone.push_back(b);
+		spin_rate.push_back(p_rates[i]);
+		anim_bone[b] = 1;
+	}
+	spin_axis = p_axis.normalized();
+	_rebuild_written();
 	return true;
 }
 
@@ -149,21 +228,42 @@ void EnemyRig::_pose(const EnemyAnim &p_a, int p_bone, Quaternion &r_rot, Vector
 	if (p_a.clip < 0 || p_a.clip >= (int)clips.size()) {
 		r_rot = rest_rot[p_bone];
 		r_pos = rest[p_bone].origin;
+	} else {
+		_clip_pose(clips[p_a.clip], p_a.time, p_bone, r_rot, r_pos);
+		const real_t w = p_a.weight();
+		if (p_a.from >= 0 && p_a.from < (int)clips.size() && w < 1.0f) {
+			Quaternion q;
+			Vector3 p;
+			_clip_pose(clips[p_a.from], p_a.from_time, p_bone, q, p);
+			r_rot = q.slerp(r_rot, w);
+			r_pos = p.lerp(r_pos, w);
+		}
+	}
+	if (lean_w > 0.0f) { // Наклон по ходу поверх клипов: вперёд / назад, затем вбок
+		_lean(p_a.lean.y >= 0.0f ? LEAN_FWD : LEAN_BACK, Math::abs(p_a.lean.y), p_bone, r_rot, r_pos);
+		_lean(p_a.lean.x >= 0.0f ? LEAN_RIGHT : LEAN_LEFT, Math::abs(p_a.lean.x), p_bone, r_rot, r_pos);
+	}
+}
+
+// Доля p_w разницы клипа направления p_lean у кости (кадр кости) — поверх позы.
+void EnemyRig::_lean(int p_lean, real_t p_w, int p_bone, Quaternion &r_rot, Vector3 &r_pos) const {
+	const uint32_t k = (uint32_t)p_lean * parent.size() + (uint32_t)p_bone;
+	if (p_w <= 1e-5f || !lean_has[k]) {
 		return;
 	}
-	_clip_pose(clips[p_a.clip], p_a.time, p_bone, r_rot, r_pos);
-	if (p_a.from < 0 || p_a.from >= (int)clips.size()) {
-		return;
+	const real_t w = MIN(p_w, (real_t)1.0f);
+	r_rot = (r_rot * Quaternion().slerp(lean_rot[k], w)).normalized();
+	r_pos += lean_pos[k] * w;
+}
+
+Quaternion EnemyRig::_spin(int p_bone, double p_time) const {
+	for (uint32_t i = 0; i < spin_bone.size(); i++) {
+		if (spin_bone[i] == p_bone) {
+			const double turns = Math::fmod((double)spin_rate[i] * p_time, 1.0);
+			return Quaternion(spin_axis, (real_t)(Math::TAU * turns));
+		}
 	}
-	const real_t w = p_a.weight();
-	if (w >= 1.0f) {
-		return;
-	}
-	Quaternion q;
-	Vector3 p;
-	_clip_pose(clips[p_a.from], p_a.from_time, p_bone, q, p);
-	r_rot = q.slerp(r_rot, w);
-	r_pos = p.lerp(r_pos, w);
+	return Quaternion();
 }
 
 void EnemyRig::arm_frames(const EnemyAnim &p_a, int p_side, Transform3D &r_upper, Transform3D &r_fore) const {
@@ -201,7 +301,7 @@ Transform3D EnemyRig::arm_rest(int p_side) const {
 	return g;
 }
 
-void EnemyRig::apply(const EnemyAnim &p_a, const Quaternion p_tilt[ARMS], Skeleton3D *p_skeleton) const {
+void EnemyRig::apply(const EnemyAnim &p_a, const Quaternion p_tilt[ARMS], Skeleton3D *p_skeleton, double p_spin_time) const {
 	ERR_FAIL_COND(!built);
 	ERR_FAIL_NULL(p_skeleton);
 	for (const int b : written) {
@@ -213,10 +313,25 @@ void EnemyRig::apply(const EnemyAnim &p_a, const Quaternion p_tilt[ARMS], Skelet
 				q = q * p_tilt[s];
 			}
 		}
+		if (!spin_bone.is_empty()) {
+			q = q * _spin(b, p_spin_time);
+		}
 		p_skeleton->set_bone_pose_rotation(b, q);
 		if (has_pos[b]) {
 			p_skeleton->set_bone_pose_position(b, p);
 		}
+	}
+}
+
+void EnemyRig::apply_spin(const EnemyAnim &p_a, Skeleton3D *p_skeleton, double p_spin_time) const {
+	ERR_FAIL_COND(!built);
+	ERR_FAIL_NULL(p_skeleton);
+	for (uint32_t i = 0; i < spin_bone.size(); i++) {
+		const int b = spin_bone[i];
+		Quaternion q;
+		Vector3 p;
+		_pose(p_a, b, q, p);
+		p_skeleton->set_bone_pose_rotation(b, q * _spin(b, p_spin_time));
 	}
 }
 
@@ -226,4 +341,9 @@ void EnemyRig::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("clip_find", "name"), &EnemyRig::clip_find);
 	ClassDB::bind_method(D_METHOD("get_clip_count"), &EnemyRig::get_clip_count);
 	ClassDB::bind_method(D_METHOD("clip_length", "clip"), &EnemyRig::clip_length);
+	ClassDB::bind_method(D_METHOD("set_lean", "skeleton", "player", "clips", "time"), &EnemyRig::set_lean);
+	ClassDB::bind_method(D_METHOD("has_lean"), &EnemyRig::has_lean);
+	ClassDB::bind_method(D_METHOD("lean_omega"), &EnemyRig::lean_omega);
+	ClassDB::bind_method(D_METHOD("set_spin", "skeleton", "bones", "axis", "rates"), &EnemyRig::set_spin);
+	ClassDB::bind_method(D_METHOD("has_spin"), &EnemyRig::has_spin);
 }

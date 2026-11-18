@@ -41,6 +41,10 @@ class Node3D;
 // стоит: двойного отхода нет), остаток добавки сходит к снимку не медленнее экспоненты YIELD_RELAX_S (сверх догона, не
 // быстрее предела отхода); ход к теснящей точке снят, плюс скорость уступки. Снимок не нарушает закон — добавка не
 // растёт и сходит без рывка. Тело, хит-тела и визуал — в позе копии.
+// Наклон по ходу (бриф коптера 2026-11-17, шаг 4; как у тела хоста — EnemyAnim::lean_move): вход — показанный ход копии
+// за тик (поза снимка плюс добавка, система пространства) относительно её взгляда, доля полной скорости типа
+// (replica_set_lean: скорость полёта профиля); снимок прежний (наклон не едет в сети — каждый пир считает по своему
+// показу); переход между пространствами — вход 0.
 class EnemyReplicas : public RefCounted {
 	GDCLASS(EnemyReplicas, RefCounted);
 
@@ -88,6 +92,9 @@ private:
 		Vector3 bo_off; // Местная добавка к позе снимка (система bo_space, горизонталь)
 		Vector3 bo_prev; // Поза снимка прошлого тика (система bo_space)
 		int bo_space = -1; // Пространство добавки; -1 — прошлого тика нет
+		real_t lean_full = 0.0f; // Полная скорость наклона (replica_set_lean), м/с; 0 — без наклона
+		Vector3 lean_from; // Показанная поза прошлого тика (система lean_space)
+		int lean_space = -1; // −1 — нет
 	};
 
 	struct Space {
@@ -171,6 +178,10 @@ public:
 	void set_priority_points(const PackedVector4Array &p_points) { prio_points = p_points; }
 	void replica_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
 	Vector3 replica_backoff(int p_h) const;
+	// Наклон по ходу (как EnemyBodies: полная скорость — скорость полёта профиля типа, м/с); наклон тика (пробы: x — вбок,
+	// y — вперёд; z, w — скорость)
+	void replica_set_lean(int p_h, real_t p_full_speed);
+	Vector4 replica_lean(int p_h) const;
 	// Тик копий: ручки копий с наступившими событиями (клипы — get_due_clips, по порядку)
 	PackedInt32Array tick(double p_seek);
 	Array get_due_clips() const { return due_clips; }

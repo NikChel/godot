@@ -2,6 +2,7 @@
 
 #include "enemy_rig.h"
 
+#include "core/math/basis.h"
 #include "core/math/math_funcs.h"
 
 real_t EnemyAnim::walk_rate(real_t p_speed) {
@@ -31,8 +32,22 @@ void EnemyAnim::play(int p_clip, real_t p_blend, bool p_action) {
 	acting = p_action;
 }
 
+void EnemyAnim::lean_input(real_t p_side, real_t p_fwd) {
+	lean_goal = Vector2(p_side, p_fwd).limit_length(1.0f);
+}
+
+void EnemyAnim::lean_move(const Vector3 &p_step, real_t p_yaw, real_t p_dt, real_t p_full) {
+	if (p_dt <= 0.0f || p_full <= 0.0f || p_step.length_squared() > LEAN_JUMP * LEAN_JUMP) {
+		lean_input(0.0f, 0.0f);
+		return;
+	}
+	const Vector3 v = Basis(Vector3(0.0f, 1.0f, 0.0f), p_yaw).xform_inv(p_step) / (p_dt * p_full); // −Z — взгляд
+	lean_input(v.x, -v.z);
+}
+
 void EnemyAnim::step(const EnemyRig &p_rig, real_t p_dt, real_t p_speed) {
 	*this = advanced(p_dt);
+	lean_k = p_rig.lean_omega();
 	time = p_rig.clip_wrap(clip, time);
 	if (from >= 0) {
 		from_time = p_rig.clip_wrap(from, from_time);
@@ -65,6 +80,13 @@ EnemyAnim EnemyAnim::advanced(real_t p_dt) const {
 		if (a.blend >= a.blend_len) {
 			a.from = -1;
 		}
+	}
+	if (lean_k > 0.0f && p_dt > 0.0f) { // Пружина с критическим затуханием: x(t) = цель + (c1 + c2·t)·e^(−ωt)
+		const Vector2 c1 = lean - lean_goal;
+		const Vector2 c2 = lean_vel + c1 * lean_k;
+		const real_t e = Math::exp(-lean_k * p_dt);
+		a.lean = lean_goal + (c1 + c2 * p_dt) * e;
+		a.lean_vel = (lean_vel - c2 * (lean_k * p_dt)) * e;
 	}
 	return a;
 }

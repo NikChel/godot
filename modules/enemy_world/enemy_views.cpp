@@ -45,6 +45,7 @@ int EnemyViews::view_add(Node3D *p_root, Skeleton3D *p_skeleton, const Ref<Enemy
 		anim_curr.resize(n);
 		tilt_prev.resize(n * EnemyRig::ARMS);
 		tilt_curr.resize(n * EnemyRig::ARMS);
+		spin_t.resize(n);
 		tier.resize(n);
 		used.resize(n);
 		has_pose.resize(n);
@@ -65,6 +66,7 @@ int EnemyViews::view_add(Node3D *p_root, Skeleton3D *p_skeleton, const Ref<Enemy
 		tilt_prev[h * EnemyRig::ARMS + s] = Quaternion();
 		tilt_curr[h * EnemyRig::ARMS + s] = Quaternion();
 	}
+	spin_t[h] = 0.137 * (double)h; // Фаза вращения по ручке: соседние винты не в такт
 	tier[h] = TIER_NEAR;
 	used[h] = 1;
 	has_pose[h] = 0;
@@ -190,7 +192,7 @@ void EnemyViews::view_snap(int p_h) {
 	for (int a = 0; a < EnemyRig::ARMS; a++) {
 		tilt[a] = tilt_curr[k + a];
 	}
-	rig[p_h]->apply(anim_prev[p_h].advanced(tick_dt), tilt, skel); // Как кадр при доле 1
+	rig[p_h]->apply(anim_prev[p_h].advanced(tick_dt), tilt, skel, spin_t[p_h]); // Как кадр при доле 1
 }
 
 void EnemyViews::view_reset(int p_h) {
@@ -237,12 +239,22 @@ void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) 
 		const int t = tier_override >= 0 ? tier_override : _tier_for(tier[i], xf.origin.distance_to(p_camera));
 		tier[i] = (uint8_t)t;
 		tier_counts[t]++;
+		spin_t[i] += (double)p_delta;
+		if (!has_anim[i] || rig[i].is_null() || !rig[i]->is_built()) {
+			continue;
+		}
 		const uint64_t every = (uint64_t)(t == TIER_NEAR ? 1 : (t == TIER_MID ? MID_EVERY : FAR_EVERY));
-		if ((frame_no + i) % every != 0 || !has_anim[i] || rig[i].is_null() || !rig[i]->is_built()) {
+		const bool due = (frame_no + i) % every == 0;
+		if (!due && !rig[i]->has_spin()) {
 			continue;
 		}
 		Skeleton3D *skel = ObjectDB::get_instance<Skeleton3D>(skel_id[i]);
 		if (skel == nullptr) {
+			continue;
+		}
+		const EnemyAnim a = anim_prev[i].advanced(p_alpha * tick_dt);
+		if (!due) {
+			rig[i]->apply_spin(a, skel, spin_t[i]); // Уровень пропускает кадр: только вращение
 			continue;
 		}
 		const uint32_t k = i * EnemyRig::ARMS;
@@ -250,7 +262,7 @@ void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) 
 		for (int s = 0; s < EnemyRig::ARMS; s++) {
 			tilt[s] = tilt_prev[k + s].slerp(tilt_curr[k + s], p_alpha);
 		}
-		rig[i]->apply(anim_prev[i].advanced(p_alpha * tick_dt), tilt, skel);
+		rig[i]->apply(a, tilt, skel, spin_t[i]);
 	}
 	last_frame_usec = (int)(OS::get_singleton()->get_ticks_usec() - t0);
 }
@@ -258,6 +270,11 @@ void EnemyViews::frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta) 
 int EnemyViews::view_tier(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), TIER_OFF);
 	return tier[p_h];
+}
+
+double EnemyViews::view_spin_time(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), 0.0);
+	return spin_t[p_h];
 }
 
 int EnemyViews::get_tier_count(int p_tier) const {
@@ -290,6 +307,7 @@ void EnemyViews::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("view_reset", "handle"), &EnemyViews::view_reset);
 	ClassDB::bind_method(D_METHOD("frame", "alpha", "camera", "delta"), &EnemyViews::frame);
 	ClassDB::bind_method(D_METHOD("view_tier", "handle"), &EnemyViews::view_tier);
+	ClassDB::bind_method(D_METHOD("view_spin_time", "handle"), &EnemyViews::view_spin_time);
 	ClassDB::bind_method(D_METHOD("get_tier_count", "tier"), &EnemyViews::get_tier_count);
 	ClassDB::bind_method(D_METHOD("get_view_count"), &EnemyViews::get_view_count);
 	ClassDB::bind_method(D_METHOD("get_last_frame_usec"), &EnemyViews::get_last_frame_usec);

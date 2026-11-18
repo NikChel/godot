@@ -77,6 +77,12 @@ class Node3D;
 // первом выстреле очереди); RECOVER — отход ближе минимальной (до неё + FIRE_BACK_GAP, лётом, без пути), подлёт дальше
 // максимальной или не видна, иначе висит; в конце — снова прицел в полосе огня с видимостью (вставши), иначе CHASE.
 // Прицел и очередь доводятся до конца; оглушение сбивает их.
+// Коптер, шаг 4 (бриф коптера 2026-11-17): видимость стрелка — по линиям стволов (body_set_muzzles: дула в координатах
+// тела в позе покоя модели, радиус снаряда): из каждого дула — взглядом на цель (как тело встанет к выстрелу, без наклона
+// неваляшки; та же поза, что у выстрела EnemyShot) — свип сферы радиуса снаряда (0 — луч) по слою мира до центра цели;
+// все свободны — видна. Дул нет — луч от центра, как было. Наклон по ходу (EnemyAnim::lean, клипы направлений рига):
+// вход — ход тела за тик в системе пространства относительно взгляда, доля скорости полёта (вертикаль не в счёт); тик
+// без хода (телепорт, смена пространства) — вход 0 (у копии — тот же закон по своему показанному ходу, EnemyReplicas).
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -252,6 +258,9 @@ private:
 		bool away = false; // …и тело отлетает от неё в этом тике (не в прицеле и очереди)
 		bool seen = false; // Цель видна (луч по слою мира, последний)
 		ObjectID seen_id; // …для этой цели
+		PackedVector3Array muzzles; // Дула (body_set_muzzles: координаты тела, поза покоя); пусто — видимость от центра
+		real_t sight_r = 0.0f; // Радиус свипа видимости (снаряд), м; 0 — луч
+		RID sight_shape; // Сфера свипа (своя у тела)
 		// Запрос пути (EVENT_PATH)
 		Vector3 path_from;
 		Vector3 goal;
@@ -280,6 +289,8 @@ private:
 		EnemyAnim anim;
 		EnemyArms arms;
 		EnemyWake wake;
+		Vector3 lean_from; // Поза тика в системе пространства (вход наклона: ход за тик) …
+		int lean_space = -1; // … и её пространство (−1 — нет: тик без хода)
 		// Приоритет игроков
 		real_t bo_radius = 0.32f; // Числа уступки (body_set_backoff; EnemyWorld::Backoff)
 		real_t bo_gap = 0.1f;
@@ -332,6 +343,7 @@ private:
 	PackedVector4Array prio_points; // Точки приоритета (мир): ноги игроков, w — радиус касания
 	PackedVector4Array prio_local; // Они же в системе пространства (раздача толпам)
 	uint64_t last_tick_usec = 0;
+	real_t tick_dt = 0.0f; // Шаг этого тика, с (вход наклона)
 	int tier_counts[2] = {};
 	int rest_count = 0;
 	EnemyLinks links;
@@ -368,6 +380,7 @@ private:
 	Transform3D _tumble_base(const Body &p_b, CharacterBody3D *p_body) const;
 	Transform3D _avatar_xf(const Body &p_b, CharacterBody3D *p_body) const;
 	void _view_anim(const Body &p_b);
+	void _lean_input(Body &r_b);
 	bool _wake(Body &r_b, CharacterBody3D *p_body, real_t p_dt);
 	// Приоритет игроков
 	void _priority_to_spaces();
@@ -384,6 +397,7 @@ private:
 	void _brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p_ti, uint64_t p_now);
 	void _strike_tick(int p_h, Body &r_b, uint64_t p_now);
 	bool _sees(const Body &p_b, CharacterBody3D *p_body, int p_ti) const;
+	bool _line_free(const Body &p_b, CharacterBody3D *p_body, PhysicsDirectSpaceState3D *p_space, const Vector3 &p_from, const Vector3 &p_to) const;
 	real_t _fire_dist(const Body &p_b, CharacterBody3D *p_body, int p_ti) const;
 	static uint64_t _ticks(real_t p_s);
 	// Движение
@@ -523,6 +537,11 @@ public:
 	void body_set_attack(int p_h, real_t p_windup_time, real_t p_recover_time, int p_shots, real_t p_shot_interval, real_t p_range_min, real_t p_range_want, real_t p_range_max);
 	bool body_sees(int p_h) const;
 	bool body_away(int p_h) const;
+	// Коптер, шаг 4: дула стрелка (координаты тела: точка — начало, взгляд — −Z; поза покоя модели) и радиус свипа
+	// видимости (снаряд; 0 — луч); пусто — видимость от центра. Наклон по ходу тика (пробы): x — вбок (вправо +), y —
+	// вперёд (+) — доли позы клипов направлений; z, w — их скорость, 1/с
+	void body_set_muzzles(int p_h, const PackedVector3Array &p_muzzles, real_t p_radius);
+	Vector4 body_lean(int p_h) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);

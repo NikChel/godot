@@ -297,6 +297,19 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			world += _yield(r, world, dt); // Поза копии — снимок плюс местная уступка своему игроку
 			body->set_global_position(world);
 		}
+		if (sampled && !r.cross) { // Вход наклона — показанный ход копии за тик (как у тела хоста)
+			const Vector3 shown = r.pos + r.bo_off;
+			if (r.lean_space == r.space) {
+				r.anim.lean_move(shown - r.lean_from, r.yaw, dt, r.lean_full);
+			} else {
+				r.anim.lean_input(0.0f, 0.0f);
+			}
+			r.lean_from = shown;
+			r.lean_space = r.space;
+		} else {
+			r.anim.lean_input(0.0f, 0.0f);
+			r.lean_space = -1;
+		}
 		if (sampled && views.is_valid() && r.view >= 0) {
 			const Basis yaw = r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
 			if (r.cross) {
@@ -505,6 +518,17 @@ Vector3 EnemyReplicas::replica_backoff(int p_h) const {
 	return reps[p_h].bo_off;
 }
 
+void EnemyReplicas::replica_set_lean(int p_h, real_t p_full_speed) {
+	ERR_FAIL_COND(!_valid(p_h));
+	reps[p_h].lean_full = MAX(p_full_speed, (real_t)0.0f);
+}
+
+Vector4 EnemyReplicas::replica_lean(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector4());
+	const EnemyAnim &a = reps[p_h].anim;
+	return Vector4(a.lean.x, a.lean.y, a.lean_vel.x, a.lean_vel.y);
+}
+
 int EnemyReplicas::replica_move(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), 0);
 	return reps[p_h].move;
@@ -569,6 +593,8 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_priority_points", "points"), &EnemyReplicas::set_priority_points);
 	ClassDB::bind_method(D_METHOD("replica_set_backoff", "handle", "radius", "gap", "gain", "speed"), &EnemyReplicas::replica_set_backoff);
 	ClassDB::bind_method(D_METHOD("replica_backoff", "handle"), &EnemyReplicas::replica_backoff);
+	ClassDB::bind_method(D_METHOD("replica_set_lean", "handle", "full_speed"), &EnemyReplicas::replica_set_lean);
+	ClassDB::bind_method(D_METHOD("replica_lean", "handle"), &EnemyReplicas::replica_lean);
 	ClassDB::bind_method(D_METHOD("get_due_clips"), &EnemyReplicas::get_due_clips);
 	ClassDB::bind_method(D_METHOD("get_replica_count"), &EnemyReplicas::get_replica_count);
 	ClassDB::bind_method(D_METHOD("get_last_tick_usec"), &EnemyReplicas::get_last_tick_usec);

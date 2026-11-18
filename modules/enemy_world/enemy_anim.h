@@ -1,6 +1,8 @@
 #pragma once
 
 #include "core/math/math_defs.h"
+#include "core/math/vector2.h"
+#include "core/math/vector3.h"
 
 class EnemyRig;
 
@@ -11,6 +13,12 @@ class EnemyRig;
 // затем снова по скорости; смена — смешивание с прошлым клипом (он идёт дальше, его вес линейно падает до нуля). Смена
 // — только в шаге, после хода времени, с весом 0: кадр (прошлый тик + доля) непрерывен и при доле 1 равен тику. Клипы — номера EnemyRig: 0 —
 // стойка, 1 — шаг, дальше разовые. Общая для тел хоста (EnemyBodies) и копий клиента (EnemyReplicas).
+// Наклон по ходу (бриф коптера 2026-11-17, шаг 4; клипы направлений рига — EnemyRig::set_lean): доля позы клипа —
+// x вбок (вправо +), y вперёд (+), поверх клипа стойки / шага / разового. Цель — вход прошлого тика (lean_move: ход за
+// тик относительно взгляда, доля полной скорости; длина не больше 1); ход к ней — пружина с критическим затуханием
+// (без перелёта, скорость наклона непрерывна — без рывка при смене направления), ω — у рига (время входа). Ход — в
+// advanced закрытой формой: кадр продвигает его на долю тика без записи, при доле 1 — ровно тик. Рига без клипов
+// направлений (ω 0) наклон не трогает.
 struct EnemyAnim {
 	static constexpr int CLIP_STAND = 0;
 	static constexpr int CLIP_WALK = 1;
@@ -34,8 +42,18 @@ struct EnemyAnim {
 	real_t blend_len = 0.0f;
 	bool acting = false; // Идёт разовый клип
 	int pending = -1; // Заказанный разовый клип (включит следующий шаг)
+	Vector2 lean; // Наклон: доля позы клипов направлений (x — вправо, y — вперёд)
+	Vector2 lean_vel; // Скорость наклона, 1/с
+	Vector2 lean_goal; // Цель наклона (вход прошлого тика)
+	real_t lean_k = 0.0f; // ω пружины наклона, 1/с (EnemyRig::lean_omega; 0 — наклона нет)
+
+	static constexpr real_t LEAN_JUMP = 1.0f; // Ход за тик длиннее — скачок (перенос, портал): вход наклона 0, м
 
 	void request(int p_clip) { pending = p_clip; }
+	void lean_input(real_t p_side, real_t p_fwd); // Цель наклона (конец тика): доли полной скорости, длина ≤ 1
+	// Вход наклона по ходу за тик (тело хоста и копия — один закон): p_step — ход в системе пространства (верх — её Y),
+	// взгляд p_yaw вокруг верха, доля полной скорости p_full; вертикаль не в счёт; скачок — 0
+	void lean_move(const Vector3 &p_step, real_t p_yaw, real_t p_dt, real_t p_full);
 	bool busy() const { return acting || pending >= 0; } // Разовый клип идёт или заказан
 	void play(int p_clip, real_t p_blend, bool p_action);
 	void step(const EnemyRig &p_rig, real_t p_dt, real_t p_speed); // Тик: время и правила

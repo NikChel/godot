@@ -13,8 +13,17 @@ static const real_t LN2 = 0.6931471805599453f;
 static const Vector3 UP_AXIS = Vector3(0.0f, 1.0f, 0.0f);
 
 EnemyBodies::~EnemyBodies() {
-	if (query_sphere.is_valid() && PhysicsServer3D::get_singleton()) {
-		PhysicsServer3D::get_singleton()->free_rid(query_sphere);
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	if (ps == nullptr) {
+		return;
+	}
+	if (query_sphere.is_valid()) {
+		ps->free_rid(query_sphere);
+	}
+	for (const Body &b : bodies) {
+		if (b.sight_shape.is_valid()) {
+			ps->free_rid(b.sight_shape);
+		}
 	}
 }
 
@@ -122,6 +131,9 @@ void EnemyBodies::body_remove(int p_h) {
 	EnemyWorld *c = _crowd(b);
 	if (c != nullptr && b.crowd >= 0) {
 		c->agent_remove(b.crowd);
+	}
+	if (b.sight_shape.is_valid() && PhysicsServer3D::get_singleton()) {
+		PhysicsServer3D::get_singleton()->free_rid(b.sight_shape);
 	}
 	b = Body();
 	free_handles.push_back(p_h);
@@ -231,6 +243,7 @@ void EnemyBodies::body_teleport(int p_h, int p_space, const Transform3D &p_world
 	b.lag_prev = 0.0f;
 	b.lag_curr = 0.0f;
 	b.was_floor = false; // Касание после переноса — проверка пола
+	b.lean_space = -1; // Перенос — не ход: вход наклона этого тика 0
 	if (views.is_valid() && b.view >= 0) {
 		views->view_reset(b.view);
 	}
@@ -295,6 +308,30 @@ bool EnemyBodies::body_sees(int p_h) const {
 bool EnemyBodies::body_away(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), false);
 	return bodies[p_h].away;
+}
+
+void EnemyBodies::body_set_muzzles(int p_h, const PackedVector3Array &p_muzzles, real_t p_radius) {
+	ERR_FAIL_COND(!_valid(p_h));
+	Body &b = bodies[p_h];
+	b.muzzles = p_muzzles;
+	b.sight_r = MAX(p_radius, 0.0f);
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	if (b.sight_r > 0.0f && !p_muzzles.is_empty()) {
+		if (!b.sight_shape.is_valid()) {
+			b.sight_shape = ps->sphere_shape_create();
+		}
+		ps->shape_set_data(b.sight_shape, b.sight_r);
+	} else if (b.sight_shape.is_valid()) {
+		ps->free_rid(b.sight_shape);
+		b.sight_shape = RID();
+	}
+	b.seen_id = ObjectID(); // Видимость — заново, по новым линиям
+}
+
+Vector4 EnemyBodies::body_lean(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), Vector4());
+	const EnemyAnim &a = bodies[p_h].anim;
+	return Vector4(a.lean.x, a.lean.y, a.lean_vel.x, a.lean_vel.y);
 }
 
 void EnemyBodies::body_add_hits(int p_h, int p_hits) {
@@ -554,6 +591,7 @@ void EnemyBodies::_emit(int p_kind, int p_h) {
 PackedInt32Array EnemyBodies::tick(real_t p_delta) {
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
 	events.clear();
+	tick_dt = p_delta;
 	tier_counts[TIER_NEAR] = 0;
 	tier_counts[TIER_FAR] = 0;
 	rest_count = 0;
@@ -715,6 +753,7 @@ void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D
 	r_b.view_speed = p_vel.dot(torso.xform(Vector3(0.0f, 0.0f, -1.0f)));
 	r_b.net_tick = (int64_t)p_now;
 	r_b.net_pos = p_fx.affine_inverse().xform(pos);
+	_lean_input(r_b);
 	if (views.is_valid() && r_b.view >= 0) { // Визуалу — в системе пространства (кадр ставит позой кадра системы)
 		views->view_commit(r_b.view, Transform3D(r_b.tumb.basis() * Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.space);
 		_view_anim(r_b);
@@ -767,6 +806,18 @@ bool EnemyBodies::_wake(Body &r_b, CharacterBody3D *p_body, real_t p_dt) {
 void EnemyBodies::_view_anim(const Body &p_b) {
 	const Quaternion tilt[EnemyRig::ARMS] = { p_b.arms.tilt(0), p_b.arms.tilt(1) };
 	views->view_anim(p_b.view, p_b.anim, tilt);
+}
+
+// Вход наклона (конец тика, заголовок): ход позы тика в системе пространства (net_pos) за тик относительно взгляда
+// (EnemyAnim::lean_move), доля скорости полёта. Прошлой позы в этом пространстве нет — 0.
+void EnemyBodies::_lean_input(Body &r_b) {
+	if (r_b.lean_space == r_b.space) {
+		r_b.anim.lean_move(r_b.net_pos - r_b.lean_from, r_b.yaw, tick_dt, r_b.fly_speed);
+	} else {
+		r_b.anim.lean_input(0.0f, 0.0f);
+	}
+	r_b.lean_from = r_b.net_pos;
+	r_b.lean_space = r_b.space;
 }
 
 // Взгляд (мир, по верху тела): −Z торса.
@@ -1126,15 +1177,54 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 	}
 }
 
-// Цель видна: луч по слою мира от центра тела к центру цели.
+// Цель видна (заголовок): дул нет — луч по слою мира от центра тела к центру цели; есть — линии всех дул (поза покоя,
+// взгляд на цель вокруг верха системы — как тело встанет к выстрелу) до центра цели свободны.
 bool EnemyBodies::_sees(const Body &p_b, CharacterBody3D *p_body, int p_ti) const {
+	PhysicsDirectSpaceState3D *ss = p_body->get_world_3d()->get_direct_space_state();
+	const Vector3 pos = p_body->get_global_position();
+	const Vector3 to = players_pos[p_ti] + p_b.up * CENTER_H;
+	if (p_b.muzzles.is_empty()) {
+		return _line_free(p_b, p_body, ss, pos + p_b.up * CENTER_H, to);
+	}
+	const Basis sys = _frame_xform(p_b).basis;
+	Vector3 f = to - (pos + p_b.up * CENTER_H);
+	f -= p_b.up * f.dot(p_b.up);
+	real_t yaw = p_b.yaw;
+	if (f.length_squared() > 1e-4f) {
+		const Vector3 fl = sys.xform_inv(f);
+		yaw = Math::atan2(-fl.x, -fl.z);
+	}
+	const Basis look = sys * Basis(UP_AXIS, yaw);
+	for (int i = 0; i < p_b.muzzles.size(); i++) {
+		if (!_line_free(p_b, p_body, ss, pos + look.xform(p_b.muzzles[i]), to)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Линия от p_from до p_to свободна по слою мира: свип сферы видимости тела (радиус снаряда; начало в стене — закрыта),
+// без неё — луч.
+bool EnemyBodies::_line_free(const Body &p_b, CharacterBody3D *p_body, PhysicsDirectSpaceState3D *p_space, const Vector3 &p_from, const Vector3 &p_to) const {
+	if (p_b.sight_shape.is_valid() && p_b.sight_r > 0.0f) {
+		PhysicsDirectSpaceState3D::ShapeParameters q;
+		q.shape_rid = p_b.sight_shape;
+		q.transform = Transform3D(Basis(), p_from);
+		q.motion = p_to - p_from;
+		q.collision_mask = FLOOR_LAYER;
+		q.exclude.insert(p_body->get_rid());
+		real_t safe = 1.0f;
+		real_t unsafe = 1.0f;
+		p_space->cast_motion(q, safe, unsafe);
+		return safe >= 1.0f;
+	}
 	PhysicsDirectSpaceState3D::RayParameters rq;
-	rq.from = p_body->get_global_position() + p_b.up * CENTER_H;
-	rq.to = players_pos[p_ti] + p_b.up * CENTER_H;
+	rq.from = p_from;
+	rq.to = p_to;
 	rq.collision_mask = FLOOR_LAYER;
 	rq.exclude.insert(p_body->get_rid());
 	PhysicsDirectSpaceState3D::RayResult hit;
-	return !p_body->get_world_3d()->get_direct_space_state()->intersect_ray(rq, hit);
+	return !p_space->intersect_ray(rq, hit);
 }
 
 // Дальность огня: центр тела к центру цели (= ноги к ногам).
@@ -1505,6 +1595,8 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_set_attack", "handle", "windup_time", "recover_time", "shots", "shot_interval", "range_min", "range_want", "range_max"), &EnemyBodies::body_set_attack);
 	ClassDB::bind_method(D_METHOD("body_sees", "handle"), &EnemyBodies::body_sees);
 	ClassDB::bind_method(D_METHOD("body_away", "handle"), &EnemyBodies::body_away);
+	ClassDB::bind_method(D_METHOD("body_set_muzzles", "handle", "muzzles", "radius"), &EnemyBodies::body_set_muzzles);
+	ClassDB::bind_method(D_METHOD("body_lean", "handle"), &EnemyBodies::body_lean);
 
 	BIND_ENUM_CONSTANT(BRAIN_IDLE);
 	BIND_ENUM_CONSTANT(BRAIN_CHASE);

@@ -21,6 +21,9 @@ class Skeleton3D;
 // ручкам). Анимация — состояние тика (view_anim: EnemyAnim и наклоны рук; spec 2026-10-27-walker-arms-design §2):
 // кадр показывает прошлый тик, продвинутый на долю кадра (alpha / ticks), позы костей — EnemyRig модели. Поза —
 // каждый кадр у всех. Пишет только аватары, состояние тика не читает и не пишет (AGENTS §2.2).
+// Вращение костей рига (EnemyRig::set_spin, винты; бриф коптера 2026-11-17, шаг 4) — величина кадра: время вращения
+// вида копит кадр (delta) у показанных видов (выключенный — мёртв, лежит куклой — не крутится); кости вращения — каждый
+// кадр на любом уровне (кадр без полной позы уровня — только они), иначе пропуск кадров уровня даёт стробоскоп.
 class EnemyViews : public RefCounted {
 	GDCLASS(EnemyViews, RefCounted);
 
@@ -59,6 +62,7 @@ private:
 	LocalVector<EnemyAnim> anim_curr;
 	LocalVector<Quaternion> tilt_prev; // Наклоны рук: по EnemyRig::ARMS на вид
 	LocalVector<Quaternion> tilt_curr;
+	LocalVector<double> spin_t; // Время вращения вида (кадр), с
 	LocalVector<uint8_t> tier;
 	LocalVector<uint8_t> used;
 	LocalVector<uint8_t> has_pose;
@@ -92,6 +96,7 @@ public:
 	void frame(real_t p_alpha, const Vector3 &p_camera, real_t p_delta);
 
 	int view_tier(int p_h) const;
+	double view_spin_time(int p_h) const; // Время вращения вида, с (пробы)
 	int get_tier_count(int p_tier) const;
 	int get_view_count() const;
 	int get_last_frame_usec() const { return last_frame_usec; }
