@@ -86,6 +86,7 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 	fly_pts.clear();
 	fly_h.clear();
 	fly_s.clear();
+	fly_go.clear();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
 		const Body &b = bodies[h];
 		if (!b.used || b.dead) {
@@ -97,6 +98,7 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 				fly_pts.push_back(n->get_global_position() + b.up * CENTER_H);
 				fly_h.push_back((int)h);
 				fly_s.push_back(b.space);
+				fly_go.push_back(b.state == EnemyWorld::AGENT_MOVE ? 1 : 0);
 			}
 		}
 		if (b.space != 0 || !ready || (b.move != MOVE_FLY && !b.zero_g) || b.point_set) {
@@ -332,9 +334,9 @@ bool EnemyBodies::_in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const 
 }
 
 // Очередь и расстояние лётом (центры летящих пространства p_space на начало тика): другой летящий ближе FLY_HOLD_R впереди
-// по пути к цели и ближе к ней — ждёт (r_hold); ближе FLY_SEP_R — скорость расхождения от него (FLY_SEP_GAIN на метр, не
-// быстрее FLY_SEP_SPEED).
-Vector3 EnemyBodies::_fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const {
+// по пути к цели и ближе к ней — ждёт (r_hold; p_behind_still — и за стоящим, иначе только за шедшим в прошлом тике); ближе
+// FLY_SEP_R — скорость расхождения от него (FLY_SEP_GAIN на метр, не быстрее FLY_SEP_SPEED).
+Vector3 EnemyBodies::_fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool p_behind_still, bool &r_hold) const {
 	r_hold = false;
 	Vector3 sep;
 	const Vector3 to = p_goal - p_center;
@@ -348,7 +350,7 @@ Vector3 EnemyBodies::_fly_crowd(int p_h, int p_space, const Vector3 &p_center, c
 		if (l < FLY_SEP_R && l > 1e-4f) {
 			sep -= d * (MIN(FLY_SEP_GAIN * (FLY_SEP_R - l), FLY_SEP_SPEED) / l);
 		}
-		if (!r_hold && my > 1e-4f && l < FLY_HOLD_R && d.dot(to) > 0.5f * l * my && fly_pts[i].distance_to(p_goal) < my) {
+		if (!r_hold && (p_behind_still || fly_go[i] != 0) && my > 1e-4f && l < FLY_HOLD_R && d.dot(to) > 0.5f * l * my && fly_pts[i].distance_to(p_goal) < my) {
 			r_hold = true;
 		}
 	}
@@ -483,7 +485,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			aim = _fly_corner(r_b, center, goal, last);
 		}
 		bool queue = false;
-		sep = _fly_crowd(p_h, r_b.space, center, goal, queue);
+		sep = _fly_crowd(p_h, r_b.space, center, goal, !fire, queue); // Стрелок не ждёт за стоящим (шапка)
 		if (gap > 0.0f && !queue) {
 			const Vector3 d = aim - center;
 			const real_t dl = d.length();
@@ -503,13 +505,17 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			if (hold) {
 				a -= up * a.dot(up);
 			}
+			if (a.length_squared() < 1e-4f) { // Цель прямо под / над телом: назад от взгляда
+				a = -_forward(r_b, p_fx);
+				a -= up * a.dot(up);
+			}
 			if (a.length_squared() > 1e-6f) {
 				input = a.normalized();
 			}
 		}
 		if (fire) {
 			bool queue = false;
-			sep = _fly_crowd(p_h, r_b.space, center, center, queue); // Висящие и отходящие стрелки расходятся
+			sep = _fly_crowd(p_h, r_b.space, center, center, false, queue); // Висящие и отходящие стрелки расходятся
 		}
 	}
 	if (hold) {

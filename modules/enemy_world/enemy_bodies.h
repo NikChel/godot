@@ -97,8 +97,9 @@ class Node3D;
 // (EVENT_PATH, первый — сразу после смены пространства). Начало пути — точка пола под телом (луч вниз), цель — точка мозга.
 // Вне сетки полёта летит по точкам пути (у пола) на своей высоте: ввод — по горизонтали к точке пути (ближе
 // FLY_CORNER_R — к следующей; последняя — к цели), высота — рабочая (_hover_lift); отход — так же без пути; пути ещё
-// нет — висит. Очередь и расхождение летящих — внутри одного пространства. Пространство корабля без сетки полёта —
-// висит, как было.
+// нет — висит. Очередь и расхождение летящих — внутри одного пространства; стрелок (дальний бой) ждёт только за идущим
+// летящим (стоящий впереди стрелок — не очередь: обходит его, иначе не выйти на видимость). Отход от цели прямо под /
+// над телом — назад от взгляда. Пространство корабля без сетки полёта — висит, как было.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -385,7 +386,8 @@ private:
 	int fly_count = 0; // Летящих за последний тик
 	LocalVector<Vector3> fly_pts; // Центры летящих на начало тика (мир) …
 	LocalVector<int> fly_h; // … их ручки …
-	LocalVector<int> fly_s; // … и пространства
+	LocalVector<int> fly_s; // … пространства …
+	LocalVector<uint8_t> fly_go; // … и шли ли они в прошлом тике (ввод хода)
 	uint64_t last_flight_usec = 0;
 
 	bool _valid(int p_h) const;
@@ -452,7 +454,7 @@ private:
 	void _land(Body &r_b, CharacterBody3D *p_body, uint64_t p_now);
 	void _tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
 	Vector3 _fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const;
-	Vector3 _fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const;
+	Vector3 _fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool p_behind_still, bool &r_hold) const;
 	bool _fly_nav(const Body &p_b) const;
 	void _fly_request(int p_h, Body &r_b, CharacterBody3D *p_body, bool p_nav, uint64_t p_now);
 	Vector3 _fly_ground(const Body &p_b, CharacterBody3D *p_body) const;
