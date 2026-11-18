@@ -106,7 +106,9 @@ class Node3D;
 // переход полётом — LiftFlight). Пространство летящего у проёма меняет GDScript по геометрии проёма — body_set_space:
 // на месте, поза и скорость в мире те же (правила пола у летящего нет). След хода кабины лифта занят в сетке полёта
 // корабля (GDScript NavFlight); части сетки — EnemyFlightGrid::component_at. К точке в прямой видимости по клеткам поле
-// точки не нужно (летит прямо): поле точки — только пока её не видно.
+// точки не нужно (летит прямо): поле точки — только пока её не видно. Поле цели готово, а от тела по нему до неё не
+// достать (цель в другой части сетки: на палубе за лифтом, в кабине) — висит, по прямой к ней не летит (маршрут —
+// порталом; поля ещё нет — по прямой, как было). Отход — не в занятые клетки сетки (за спиной — след кабины).
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -467,6 +469,7 @@ private:
 	Vector3 _fly_ground(const Body &p_b, CharacterBody3D *p_body) const;
 	Vector3 _fly_corner(Body &r_b, const Vector3 &p_center, const Vector3 &p_goal, bool &r_last);
 	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, bool p_free_up, real_t p_dt);
+	Vector3 _grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir) const;
 	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);
 	real_t _hover_lift(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
