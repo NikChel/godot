@@ -77,9 +77,19 @@ bool EnemyBodies::zero_g_at(const Vector3 &p_world) {
 	return gzones.accel_at(p_world, g) && g.length_squared() < ZERO_G * ZERO_G;
 }
 
+// Номер поля точки (летящий к точке пробы / портала): по её клетке 0.5 м, отрицательный — номера игроков (ObjectID узлов)
+// положительные.
+static int64_t fly_point_id(const Vector3 &p_local) {
+	const int64_t x = (int64_t)Math::round(p_local.x * 2.0f) & 0xFFFFF;
+	const int64_t y = (int64_t)Math::round(p_local.y * 2.0f) & 0xFFFFF;
+	const int64_t z = (int64_t)Math::round(p_local.z * 2.0f) & 0xFFFFF;
+	return -1 - (x | (y << 20) | (z << 40));
+}
+
 // Начало тика полёта: центры летящих всех пространств на начало тика (мир; очередь и расстояние между летящими одного
-// пространства — без порядка тел); цели полей (сетка готова) — цели мозга летящих и тел без тяжести пространства корабля
-// (взлетать ли — путь лётом), центры в системе корабля.
+// пространства — без порядка тел) и идут ли они (мозг ведёт к цели или точке); цели полей (сетка готова) — цели мозга
+// летящих и тел без тяжести пространства корабля (взлетать ли — путь лётом) и точки летящих к точке (портал: путь в
+// обход преград), центры в системе корабля.
 void EnemyBodies::_flight_targets(uint64_t p_now) {
 	const Space &sp = spaces[0];
 	const bool ready = flight.is_valid() && flight->is_ready();
@@ -98,10 +108,17 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 				fly_pts.push_back(n->get_global_position() + b.up * CENTER_H);
 				fly_h.push_back((int)h);
 				fly_s.push_back(b.space);
-				fly_go.push_back(b.state == EnemyWorld::AGENT_MOVE ? 1 : 0);
+				fly_go.push_back(b.moving ? 1 : 0);
 			}
 		}
-		if (b.space != 0 || !ready || (b.move != MOVE_FLY && !b.zero_g) || b.point_set) {
+		if (b.space != 0 || !ready || (b.move != MOVE_FLY && !b.zero_g)) {
+			continue;
+		}
+		if (b.point_set) {
+			if (b.move == MOVE_FLY) {
+				const Vector3 c = sp.inv.xform(b.world + b.up * CENTER_H);
+				flight->want(fly_point_id(c), c, p_now);
+			}
 			continue;
 		}
 		const int ti = _player_index(b.target);
@@ -334,7 +351,7 @@ bool EnemyBodies::_in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const 
 }
 
 // Очередь и расстояние лётом (центры летящих пространства p_space на начало тика): другой летящий ближе FLY_HOLD_R впереди
-// по пути к цели и ближе к ней — ждёт (r_hold; p_behind_still — и за стоящим, иначе только за шедшим в прошлом тике); ближе
+// по пути к цели и ближе к ней — ждёт (r_hold; p_behind_still — и за стоящим, иначе только за идущим: fly_go); ближе
 // FLY_SEP_R — скорость расхождения от него (FLY_SEP_GAIN на метр, не быстрее FLY_SEP_SPEED).
 Vector3 EnemyBodies::_fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool p_behind_still, bool &r_hold) const {
 	r_hold = false;
@@ -476,7 +493,8 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			const Space &sp = spaces[r_b.space];
 			Vector3 aim_l;
 			real_t dist = gd;
-			flight->steer(r_b.point_set ? (int64_t)0 : (int64_t)r_b.target, sp.inv.xform(center), sp.inv.xform(goal), aim_l, dist);
+			const Vector3 goal_l = sp.inv.xform(goal);
+			flight->steer(r_b.point_set ? fly_point_id(goal_l) : (int64_t)r_b.target, sp.inv.xform(center), goal_l, aim_l, dist);
 			aim = sp.xf.xform(aim_l);
 			r_b.fly_dist = dist;
 			last = aim.distance_squared_to(goal) <= 1e-4f;
