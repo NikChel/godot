@@ -7,6 +7,7 @@
 #include "core/os/os.h"
 #include "scene/3d/physics/area_3d.h"
 #include "scene/3d/physics/character_body_3d.h"
+#include "scene/3d/physics/rigid_body_3d.h"
 #include "scene/resources/3d/world_3d.h"
 
 static const real_t LN2 = 0.6931471805599453f;
@@ -419,9 +420,18 @@ int EnemyBodies::body_tumble_state(int p_h) const {
 	return bodies[p_h].tumb.state;
 }
 
-void EnemyBodies::body_set_ragdoll(int p_h, bool p_on) {
+void EnemyBodies::body_set_ragdoll(int p_h, bool p_on, Node3D *p_pelvis) {
 	ERR_FAIL_COND(!_valid(p_h));
-	bodies[p_h].ragdoll = p_on;
+	Body &b = bodies[p_h];
+	b.ragdoll = p_on;
+	b.follow_id = (p_on && p_pelvis != nullptr) ? p_pelvis->get_instance_id() : ObjectID();
+}
+
+void EnemyBodies::body_set_knockdown(int p_h, real_t p_pivot_height, real_t p_knock_time) {
+	ERR_FAIL_COND(!_valid(p_h));
+	EnemyTumbler &t = bodies[p_h].tumb;
+	t.pivot_h = MAX(p_pivot_height, 0.0f);
+	t.knock_time = MAX(p_knock_time, 0.0f);
 }
 
 void EnemyBodies::body_set_rig(int p_h, const Ref<EnemyRig> &p_rig, Node3D *p_arm_l, Node3D *p_arm_r) {
@@ -648,6 +658,9 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 		return;
 	}
 	_zone_tick(r_b, p_body);
+	if (r_b.ragdoll && r_b.move == MOVE_FLY && _follow_ragdoll(p_h, r_b, p_body, fx, p_now)) {
+		return; // Сбит лётом: тело тика — в тазу куклы
+	}
 	if (r_b.move == MOVE_WALK && r_b.flight == FLIGHT_ALWAYS && !r_b.ragdoll) {
 		_take_off(p_h, r_b, p_body); // Летает всегда — с первого тика, и без сетки (висит до неё)
 	}
@@ -755,7 +768,7 @@ void EnemyBodies::_publish(Body &r_b, CharacterBody3D *p_body, const Transform3D
 	r_b.net_pos = p_fx.affine_inverse().xform(pos);
 	_lean_input(r_b);
 	if (views.is_valid() && r_b.view >= 0) { // Визуалу — в системе пространства (кадр ставит позой кадра системы)
-		views->view_commit(r_b.view, Transform3D(r_b.tumb.basis() * Basis(UP_AXIS, r_b.yaw), r_b.net_pos), r_b.lag_curr, r_b.space);
+		views->view_commit(r_b.view, Transform3D(r_b.tumb.basis() * Basis(UP_AXIS, r_b.yaw), r_b.net_pos + r_b.tumb.sway()), r_b.lag_curr, r_b.space);
 		_view_anim(r_b);
 	}
 	tier_counts[r_b.tier]++;
@@ -784,15 +797,39 @@ Transform3D EnemyBodies::_carry(Body &r_b, CharacterBody3D *p_body) {
 	return now;
 }
 
-// Основание неваляшки (мир): базис системы тела в точке тела — у хоста и копий одно.
+// Основание неваляшки (мир): базис системы тела в точке качания (над точкой тела) — у хоста и копий одно.
 Transform3D EnemyBodies::_tumble_base(const Body &p_b, CharacterBody3D *p_body) const {
-	return Transform3D(_frame_xform(p_b).basis, p_body->get_global_position());
+	const Basis fb = _frame_xform(p_b).basis;
+	return Transform3D(fb, p_body->get_global_position() + fb.xform(p_b.tumb.pivot()));
 }
 
-// Поза корня аватара этого тика (мир) — как её покажет кадр при доле 1: система × наклон × взгляд, минус подъём шага.
+// Поза корня аватара этого тика (мир) — как её покажет кадр при доле 1: система × наклон (вокруг точки качания) × взгляд,
+// минус подъём шага.
 Transform3D EnemyBodies::_avatar_xf(const Body &p_b, CharacterBody3D *p_body) const {
-	const Basis basis = _frame_xform(p_b).basis * p_b.tumb.basis() * Basis(UP_AXIS, p_b.yaw);
-	return Transform3D(basis, p_body->get_global_position() - basis.get_column(1).normalized() * p_b.lag_curr);
+	const Basis fb = _frame_xform(p_b).basis;
+	const Basis basis = fb * p_b.tumb.basis() * Basis(UP_AXIS, p_b.yaw);
+	return Transform3D(basis, p_body->get_global_position() + fb.xform(p_b.tumb.sway()) - basis.get_column(1).normalized() * p_b.lag_curr);
+}
+
+// Сбит лётом (заголовок «Нокдаун»): тело тика — в тазу куклы (центр — в таз, скорость — таза), без полёта и физики тела;
+// мозг оглушён; поза визуалу (вид выключен — позу модели пишет кукла) и сети — как у тела. Таза нет — false (тело — как было).
+bool EnemyBodies::_follow_ragdoll(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now) {
+	RigidBody3D *pelvis = Object::cast_to<RigidBody3D>(ObjectDB::get_instance(r_b.follow_id));
+	if (pelvis == nullptr || !pelvis->is_inside_tree()) {
+		return false;
+	}
+	p_body->set_global_position(pelvis->get_global_position() - r_b.up * CENTER_H);
+	p_body->set_velocity(pelvis->get_linear_velocity());
+	_brain(p_h, r_b, p_body, p_fx, p_now); // Оглушён: прицел и очередь сбиты
+	r_b.pitch = 0.0f;
+	r_b.fly_dist = -1.0f;
+	r_b.backoff = Vector3();
+	r_b.on_step = false;
+	_lag(r_b, 0.0f, tick_dt);
+	r_b.want_speed = 0.0f;
+	r_b.state = EnemyWorld::AGENT_IDLE;
+	_publish(r_b, p_body, p_fx, Vector3(), Vector3(), false, p_now);
+	return true;
 }
 
 // Сон хит-форм: точка интереса у точки тела (над ногами по верху) или неваляшка тела / рук не в покое. true — хит-тела
@@ -1564,7 +1601,8 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_tumble_spin", "handle"), &EnemyBodies::body_tumble_spin);
 	ClassDB::bind_method(D_METHOD("body_tilt", "handle"), &EnemyBodies::body_tilt);
 	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);
-	ClassDB::bind_method(D_METHOD("body_set_ragdoll", "handle", "on"), &EnemyBodies::body_set_ragdoll);
+	ClassDB::bind_method(D_METHOD("body_set_ragdoll", "handle", "on", "pelvis"), &EnemyBodies::body_set_ragdoll, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("body_set_knockdown", "handle", "pivot_height", "knock_time"), &EnemyBodies::body_set_knockdown);
 	ClassDB::bind_method(D_METHOD("set_players", "positions", "alive", "ids"), &EnemyBodies::set_players);
 	ClassDB::bind_method(D_METHOD("set_nav_ready", "ready"), &EnemyBodies::set_nav_ready);
 	ClassDB::bind_method(D_METHOD("set_tier_override", "tier"), &EnemyBodies::set_tier_override);

@@ -16,6 +16,11 @@
 //   RISING  — подъём к вертикали без перелёта против тяжести; сбит до пола — DOWN; почти вертикально — STAND.
 // Без падения (can_fall = false, рука ходока — spec 2026-10-27-walker-arms-design): всегда STAND, fall_angle — предел
 // наклона (ход наружу на пределе гасится).
+// Нокдаун (бриф коптера 2026-11-17, шаг 5; числа профиля типа — body_set_knockdown): точка качания pivot_h над точкой
+// тела (вдоль верха основания; 0 — у ног: перевёрнутый маятник ходока; выше центра корпуса — висит, как маятник: коптер)
+// — основание неваляшки стоит в ней, наклон — вокруг неё (точка тела сдвинута на sway()); knock_time > 0 — сбит
+// (FALLING) → лежит столько с момента сбития, где бы ни был (на полу или нет), падение не отменяется, потом RISING;
+// 0 — как было: down_time с касания пола.
 // Плюс оглушение врага (staggered) и хит-тело: поза основание × наклон — в узел и сразу в PhysicsServer (видна
 // запросам того же тика). Общая для тел хоста (EnemyBodies) и копий клиента (EnemyReplicas).
 struct EnemyTumbler {
@@ -48,6 +53,8 @@ struct EnemyTumbler {
 	real_t stagger_angle = 0.17453293f; // 10°: оглушён, пока наклон больше (или не STAND)
 	real_t knockback = 0.15f; // Отброс: Δv основания = горизонталь импульса × это, м/с на Н·с
 	bool can_fall = true; // Нет — не падает, fall_angle — предел наклона
+	real_t pivot_h = 0.0f; // Точка качания над точкой тела (вдоль верха основания), м; 0 — у ног
+	real_t knock_time = 0.0f; // Нокдаун: > 0 — лежит столько с момента сбития, с; 0 — down_time с касания пола
 
 	// Состояние
 	uint8_t state = STAND;
@@ -59,14 +66,16 @@ struct EnemyTumbler {
 	void push(const Vector3 &p_r, const Vector3 &p_j);
 	bool step(real_t p_dt); // true — сменилось состояние
 	Basis basis() const;
+	Vector3 pivot() const { return Vector3(0.0f, pivot_h, 0.0f); } // Точка качания от точки тела (кадр основания)
+	Vector3 sway() const { return pivot() - basis().xform(pivot()); } // Сдвиг точки тела наклоном вокруг точки качания (кадр основания)
 	Vector3 point_velocity(const Vector3 &p_r) const { return spin.cross(p_r); }
 	bool staggered() const { return state != STAND || tilt.length() > stagger_angle; }
 	bool resting() const { return state == STAND && tilt.length_squared() < REST_TILT * REST_TILT && spin.length_squared() < REST_SPIN * REST_SPIN; }
-	void place(const Transform3D &p_base, real_t p_yaw = 0.0f) const; // Хит-тело в позу p_base × наклон × взгляд p_yaw вокруг верха (мир; формы хит-тела — в кадре модели)
+	void place(const Transform3D &p_base, real_t p_yaw = 0.0f) const; // Хит-тело в позу p_base (в точке качания) × наклон × взгляд p_yaw вокруг верха, начало — в точке тела (мир; формы хит-тела — в кадре модели)
 	void log_state() const; // Строка лога смены состояния (имя врага — родитель хит-тела)
 
 private:
-	real_t t = 0.0f; // Время на полу в DOWN, с
+	real_t t = 0.0f; // Время на полу в DOWN (нокдаун — с начала FALLING), с
 	bool impact = false; // Этот шаг — удар о пол
 
 	real_t _gravity(real_t p_a) const;

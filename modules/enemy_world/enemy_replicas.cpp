@@ -315,10 +315,11 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 		}
 		if (sampled && views.is_valid() && r.view >= 0) {
 			const Basis yaw = r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
+			const Vector3 sway = r.tumb.sway(); // Наклон — вокруг точки качания
 			if (r.cross) {
-				views->view_commit(r.view, Transform3D(xf.basis * yaw, world), r.step_lag, -1);
+				views->view_commit(r.view, Transform3D(xf.basis * yaw, world + xf.basis.xform(sway)), r.step_lag, -1);
 			} else {
-				views->view_commit(r.view, Transform3D(yaw, r.pos + r.bo_off), r.step_lag, r.space);
+				views->view_commit(r.view, Transform3D(yaw, r.pos + r.bo_off + sway), r.step_lag, r.space);
 			}
 			const Quaternion tilt[EnemyRig::ARMS] = { r.arms.tilt(0), r.arms.tilt(1) };
 			views->view_anim(r.view, r.anim, tilt);
@@ -329,7 +330,8 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			r.tumb.place(_tumble_base(r, body), r.yaw); // Поза хит-тела — как у модели (наклон × взгляд)
 			if (r.rig.is_valid()) { // Корень аватара — как его покажет кадр при доле 1
 				const Basis b = xf.basis * r.tumb.basis() * Basis(Vector3(0.0f, 1.0f, 0.0f), r.yaw);
-				r.arms.place(**r.rig, r.anim, Transform3D(b, body->get_global_position() - b.get_column(1).normalized() * r.step_lag));
+				const Vector3 at = body->get_global_position() + xf.basis.xform(r.tumb.sway());
+				r.arms.place(**r.rig, r.anim, Transform3D(b, at - b.get_column(1).normalized() * r.step_lag));
 			}
 		}
 		StringName e = _pop_due(r, p_seek);
@@ -389,10 +391,19 @@ Vector3 EnemyReplicas::_yield(Replica &r_r, const Vector3 &p_world, real_t p_dt)
 	return (sp ? sp->xf.basis : Basis()).xform(r_r.bo_off);
 }
 
-// Основание неваляшки (мир): базис системы копии (подвижная — её поза, корабль — мир, как у тела хоста) в точке тела.
+// Основание неваляшки (мир): базис системы копии (подвижная — её поза, корабль — мир, как у тела хоста) в точке качания
+// (над точкой тела).
 Transform3D EnemyReplicas::_tumble_base(const Replica &p_r, Node3D *p_body) const {
 	const bool frame = p_r.space > 0 && p_r.space < (int)spaces.size() && spaces[p_r.space].frame;
-	return Transform3D(frame ? spaces[p_r.space].xf.basis : Basis(), p_body->get_global_position());
+	const Basis fb = frame ? spaces[p_r.space].xf.basis : Basis();
+	return Transform3D(fb, p_body->get_global_position() + fb.xform(p_r.tumb.pivot()));
+}
+
+void EnemyReplicas::replica_set_knockdown(int p_h, real_t p_pivot_height, real_t p_knock_time) {
+	ERR_FAIL_COND(!_valid(p_h));
+	EnemyTumbler &t = reps[p_h].tumb;
+	t.pivot_h = MAX(p_pivot_height, 0.0f);
+	t.knock_time = MAX(p_knock_time, 0.0f);
 }
 
 void EnemyReplicas::replica_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_fall_angle, real_t p_down_angle, real_t p_height, real_t p_down_time, real_t p_rise_time, real_t p_stagger_angle, real_t p_knockback) {
@@ -578,6 +589,7 @@ void EnemyReplicas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("tick", "seek"), &EnemyReplicas::tick);
 	ClassDB::bind_method(D_METHOD("replica_set_tumbler", "handle", "hit_body", "inertia", "frequency", "damping", "fall_angle", "down_angle", "height", "down_time", "rise_time", "stagger_angle", "knockback"), &EnemyReplicas::replica_set_tumbler);
 	ClassDB::bind_method(D_METHOD("replica_push", "handle", "arm", "impulse"), &EnemyReplicas::replica_push);
+	ClassDB::bind_method(D_METHOD("replica_set_knockdown", "handle", "pivot_height", "knock_time"), &EnemyReplicas::replica_set_knockdown);
 	ClassDB::bind_method(D_METHOD("replica_tumble_base", "handle"), &EnemyReplicas::replica_tumble_base);
 	ClassDB::bind_method(D_METHOD("replica_tumble_spin", "handle"), &EnemyReplicas::replica_tumble_spin);
 	ClassDB::bind_method(D_METHOD("replica_tilt", "handle"), &EnemyReplicas::replica_tilt);

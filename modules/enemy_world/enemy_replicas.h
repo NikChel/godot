@@ -29,7 +29,9 @@ class Node3D;
 // клипы; удар по своему игроку решает GDScript). Точки — по возрастанию времени хоста, не больше CAP; пакет
 // снимка — по net id (feed_snapshot), один вызов на пакет. Тела — Node3D (ObjectID; нет тела — только буфер).
 // Неваляшка (spec 2026-10-26-walker-tumbler-design): наклон каждый пир считает сам по толчкам (replica_push; отброс —
-// снимками хоста); шаг — в тике копий, визуал — с наклоном, хит-тело — основание × наклон.
+// снимками хоста); шаг — в тике копий, визуал — с наклоном, хит-тело — основание × наклон. Нокдаун (бриф коптера
+// 2026-11-17, шаг 5): точка качания и время нокдауна с момента сбития — те же числа, что у тела хоста
+// (replica_set_knockdown); поза сбитого лётом — снимок тела хоста (оно едет в тазу своей куклы).
 // Анимация и руки (spec 2026-10-27-walker-arms-design): как у тел хоста (EnemyBodies) — часы анимации по скорости
 // снимка, разовый клип — replica_play (GDScript по событию хоста), качание рук каждый пир считает сам. Сон хит-форм
 // (EnemyWake) — как у тел хоста, по своим точкам интереса.
@@ -158,6 +160,7 @@ public:
 	Vector3 replica_aim(int p_h) const; // Прицел удара (мир): взгляд снимка с наклоном, позой пространства у этого пира
 	// Неваляшка (как EnemyBodies.body_set_tumbler / body_push; отброса у копии нет)
 	void replica_set_tumbler(int p_h, Node3D *p_hit_body, real_t p_inertia, real_t p_frequency, real_t p_damping, real_t p_fall_angle, real_t p_down_angle, real_t p_height, real_t p_down_time, real_t p_rise_time, real_t p_stagger_angle, real_t p_knockback);
+	void replica_set_knockdown(int p_h, real_t p_pivot_height, real_t p_knock_time); // Как EnemyBodies.body_set_knockdown
 	void replica_push(int p_h, const Vector3 &p_r, const Vector3 &p_j);
 	Transform3D replica_tumble_base(int p_h) const;
 	Vector3 replica_tumble_spin(int p_h) const;

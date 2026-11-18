@@ -83,6 +83,11 @@ class Node3D;
 // все свободны — видна. Дул нет — луч от центра, как было. Наклон по ходу (EnemyAnim::lean, клипы направлений рига):
 // вход — ход тела за тик в системе пространства относительно взгляда, доля скорости полёта (вертикаль не в счёт); тик
 // без хода (телепорт, смена пространства) — вход 0 (у копии — тот же закон по своему показанному ходу, EnemyReplicas).
+// Нокдаун (бриф коптера 2026-11-17, шаг 5): числа неваляшки типа сверх body_set_tumbler — body_set_knockdown (точка
+// качания над точкой тела: основание неваляшки, хит-тело, визуал и руки наклоняются вокруг неё; время нокдауна с момента
+// сбития — EnemyTumbler). Летящее тело, лежащее куклой (body_set_ragdoll с тазом), — в тазу куклы: центр тела — в таз,
+// скорость — таза, без полёта и физики тела, мозг оглушён; встало (EVENT_RISE) — летит дальше с этого места и с этой
+// скоростью тем же законом полёта.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -283,6 +288,7 @@ private:
 		// Неваляшка
 		EnemyTumbler tumb;
 		bool ragdoll = false; // Лежит куклой: подъём неваляшки — выпрямление сразу и EVENT_RISE
+		ObjectID follow_id; // Таз куклы (body_set_ragdoll): летящее тело лежит куклой — тело тика в нём
 		uint64_t rise_end = 0; // Встаёт куклой до этого тика: мозг оглушён
 		// Анимация и руки
 		Ref<EnemyRig> rig;
@@ -382,6 +388,7 @@ private:
 	void _view_anim(const Body &p_b);
 	void _lean_input(Body &r_b);
 	bool _wake(Body &r_b, CharacterBody3D *p_body, real_t p_dt);
+	bool _follow_ragdoll(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
 	// Приоритет игроков
 	void _priority_to_spaces();
 	void _set_backoff_agent(const Body &p_b);
@@ -489,8 +496,12 @@ public:
 	Vector3 body_tilt(int p_h) const;
 	int body_tumble_state(int p_h) const;
 	// Кукла (spec 2026-11-02-walker-ragdoll-design §4): лежит куклой — подъём неваляшки (RISING или STAND после падения)
-	// сразу выпрямляет её (наклон 0), мозг оглушён ещё rise_time (поза встаёт в кадре), событие EVENT_RISE
-	void body_set_ragdoll(int p_h, bool p_on);
+	// сразу выпрямляет её (наклон 0), мозг оглушён ещё rise_time (поза встаёт в кадре), событие EVENT_RISE; таз куклы
+	// (p_pelvis; нет — тело стоит, где было) — летящее тело едет в нём
+	void body_set_ragdoll(int p_h, bool p_on, Node3D *p_pelvis = nullptr);
+	// Нокдаун: точка качания неваляшки над точкой тела (м, вдоль верха; 0 — у ног) и время нокдауна с момента сбития
+	// (с; 0 — down_time неваляшки с касания пола)
+	void body_set_knockdown(int p_h, real_t p_pivot_height, real_t p_knock_time);
 	// Анимация и руки: риг модели и хит-тела рук (левая, правая); разовый клип («библиотека/клип» рига); идёт ли он, клип
 	// и темп (пробы); неваляшка руки (сторона 0 — левая): настройки (предел — рад), толчок (кадр основания), основание
 	// (мир: кадр кости плеча), угловая скорость, наклон

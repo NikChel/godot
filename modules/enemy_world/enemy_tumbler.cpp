@@ -58,23 +58,31 @@ bool EnemyTumbler::step(real_t p_dt) {
 			if (a > fall_angle) {
 				if (can_fall) {
 					state = FALLING;
+					t = 0.0f; // Нокдаун — с момента сбития
 				} else {
 					_limit();
 				}
 			}
 		} break;
 		case FALLING: {
-			if (on_floor) {
+			if (knock_time > 0.0f) { // Нокдаун: падение не отменяется, лежит knock_time с момента сбития
+				t += p_dt;
+				if (t >= knock_time) {
+					state = RISING;
+				} else if (on_floor) {
+					state = DOWN;
+				}
+			} else if (on_floor) {
 				_lie();
 			} else if (a < fall_angle && spin.dot(tilt) < 0.0f) {
 				state = STAND;
 			}
 		} break;
 		case DOWN: {
-			if (on_floor) {
+			if (on_floor || knock_time > 0.0f) {
 				t += p_dt;
 			}
-			if (t >= down_time) {
+			if (t >= (knock_time > 0.0f ? knock_time : down_time)) {
 				state = RISING;
 			}
 		} break;
@@ -99,7 +107,8 @@ void EnemyTumbler::place(const Transform3D &p_base, real_t p_yaw) const {
 	if (hit == nullptr || !hit->is_inside_tree()) {
 		return;
 	}
-	const Transform3D pose = p_base * Transform3D(basis() * Basis(UP_AXIS, p_yaw), Vector3());
+	const Basis tilted = basis();
+	const Transform3D pose = p_base * Transform3D(tilted * Basis(UP_AXIS, p_yaw), -tilted.xform(pivot())); // Основание — в точке качания
 	hit->set_global_transform(pose);
 	PhysicsServer3D::get_singleton()->body_set_state(hit->get_rid(), PhysicsServer3D::BODY_STATE_TRANSFORM, pose); // Сразу этому тику
 }
