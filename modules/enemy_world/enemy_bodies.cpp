@@ -1169,11 +1169,12 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 				return;
 			}
 			// Подлёт по пути сетки, пока дальше желаемой или не видна; ближе с видимостью — останавливается, прицел — когда
-			// встал (ход до прицела не уводит за укрытие)
+			// встал (ход до прицела не уводит за укрытие). Точка остановки с видимостью — внутри порога (желаемая −
+			// FIRE_STOP_IN, не ближе минимальной): подлёт слабеет к ней, порог желаемой проходит с ходом, а не замирает у него
 			const bool stop = !r_b.too_close && r_b.seen && d <= r_b.fire_want;
 			r_b.away = r_b.too_close;
 			r_b.moving = !r_b.too_close && !stop;
-			r_b.stop_dist = r_b.seen ? r_b.fire_want : r_b.fire_min;
+			r_b.stop_dist = r_b.seen ? MAX(r_b.fire_want - FIRE_STOP_IN, r_b.fire_min) : r_b.fire_min;
 			if (stop && p_body->get_velocity().length() < STILL_SPEED) {
 				r_b.seen = _sees(r_b, p_body, p_ti);
 				if (r_b.seen) {
