@@ -422,7 +422,9 @@ void EnemyBodies::_fly_request(int p_h, Body &r_b, CharacterBody3D *p_body, bool
 }
 
 // Куда лететь по пути сетки навигации (мир, на высоте центра — ход по горизонтали): точка пути, к которой летит (ближе
-// FLY_CORNER_R по горизонтали — следующая); последняя — сама цель (r_last). Пути ещё нет — центр (висит); путь пустой — цель.
+// FLY_CORNER_R по горизонтали, позади тела по ходу следующего отрезка дальше FLY_CORNER_R / 2 или отрезок до следующей
+// нулевой — следующая: тело вне сетки, начало пути — его проекция на край сетки, как у летящего из кабины лифта в
+// проём); последняя — сама цель (r_last). Пути ещё нет — центр (висит); путь пустой — цель.
 Vector3 EnemyBodies::_fly_corner(Body &r_b, const Vector3 &p_center, const Vector3 &p_goal, bool &r_last) {
 	const Vector3 up = r_b.up;
 	r_last = true;
@@ -439,7 +441,12 @@ Vector3 EnemyBodies::_fly_corner(Body &r_b, const Vector3 &p_center, const Vecto
 			Vector3 d = r_b.fly_path[r_b.fly_path_i] - c;
 			d -= lu * d.dot(lu);
 			if (d.length() >= FLY_CORNER_R) {
-				break;
+				Vector3 seg = r_b.fly_path[r_b.fly_path_i + 1] - r_b.fly_path[r_b.fly_path_i];
+				seg -= lu * seg.dot(lu);
+				const real_t sl = seg.length();
+				if (sl >= FLY_CORNER_R * 0.1f && -seg.dot(d) / sl < FLY_CORNER_R * 0.5f) {
+					break; // Не позади тела по ходу следующего отрезка (на угол — к ней, не срезая)
+				}
 			}
 			r_b.fly_path_i++;
 		}
