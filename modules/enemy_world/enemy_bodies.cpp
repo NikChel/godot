@@ -196,6 +196,9 @@ void EnemyBodies::_set_space(int p_h, Body &r_b, int p_space, CharacterBody3D *p
 	const Vector3 fl = r_b.frame_last.basis.xform_inv(fwd);
 	r_b.yaw = Math::atan2(-fl.x, -fl.z);
 	r_b.hint = -1;
+	r_b.fly_path.clear(); // Путь лётом — сетки старого пространства
+	r_b.fly_path_space = -1;
+	r_b.fly_req_space = -1;
 	space_changes++;
 }
 
@@ -258,6 +261,10 @@ int EnemyBodies::body_space(int p_h) const {
 void EnemyBodies::body_set_point(int p_h, const Vector3 &p_world) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
+	if (!b.point_set) { // Путь лётом — к прежней цели: к точке — новый запрос сразу
+		b.fly_path_space = -1;
+		b.fly_req_space = -1;
+	}
 	b.point_set = true;
 	b.world = p_world;
 	b.stop_dist = POINT_STOP;
@@ -267,6 +274,10 @@ void EnemyBodies::body_set_point(int p_h, const Vector3 &p_world) {
 void EnemyBodies::body_clear_point(int p_h) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
+	if (b.point_set) { // Путь лётом — к точке: к цели мозга — новый запрос сразу
+		b.fly_path_space = -1;
+		b.fly_req_space = -1;
+	}
 	b.point_set = false;
 	b.moving = false;
 	b.stop_dist = STRIKE_STOP;
@@ -283,6 +294,15 @@ void EnemyBodies::body_set_path(int p_h, const PackedVector3Array &p_points, con
 		b.path_len += p_points[i - 1].distance_to(p_points[i]);
 	}
 	b.path_gap = p_points.is_empty() ? (real_t)Math::INF : p_points[p_points.size() - 1].distance_to(p_target);
+	if (b.move == MOVE_FLY) { // Летящему вне сетки полёта — путь сетки навигации его пространства (заголовок)
+		b.fly_path.resize((uint32_t)p_points.size());
+		for (int i = 0; i < p_points.size(); i++) {
+			b.fly_path[i] = p_points[i];
+		}
+		b.fly_path_i = 0;
+		b.fly_path_space = b.space;
+		return;
+	}
 	EnemyWorld *c = _crowd(b);
 	if (c != nullptr && b.crowd >= 0) {
 		c->agent_set_path(b.crowd, p_points, p_target, p_links);
@@ -1636,6 +1656,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_away", "handle"), &EnemyBodies::body_away);
 	ClassDB::bind_method(D_METHOD("body_set_muzzles", "handle", "muzzles", "radius"), &EnemyBodies::body_set_muzzles);
 	ClassDB::bind_method(D_METHOD("body_lean", "handle"), &EnemyBodies::body_lean);
+	ClassDB::bind_method(D_METHOD("body_fly_path", "handle"), &EnemyBodies::body_fly_path);
 
 	BIND_ENUM_CONSTANT(BRAIN_IDLE);
 	BIND_ENUM_CONSTANT(BRAIN_CHASE);
@@ -1653,6 +1674,7 @@ void EnemyBodies::_bind_methods() {
 	BIND_ENUM_CONSTANT(EVENT_LINK_OPEN);
 	BIND_ENUM_CONSTANT(EVENT_FALL);
 	BIND_ENUM_CONSTANT(EVENT_RISE);
+	BIND_ENUM_CONSTANT(EVENT_ROUTE);
 	BIND_ENUM_CONSTANT(MOVE_WALK);
 	BIND_ENUM_CONSTANT(MOVE_FLY);
 	BIND_ENUM_CONSTANT(FLIGHT_ZERO_G);

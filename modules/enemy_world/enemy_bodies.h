@@ -90,6 +90,15 @@ class Node3D;
 // сбития — EnemyTumbler). Летящее тело, лежащее куклой (body_set_ragdoll с тазом), — в тазу куклы: центр тела — в таз,
 // скорость — таза, без полёта и физики тела, мозг оглушён; встало (EVENT_RISE) — летит дальше с этого места и с этой
 // скоростью тем же законом полёта.
+// Порталы для летящих (срез А «коптер и площадки», бриф 2026-11-18): маршрут — тот же, что у ходока (GDScript
+// WalkerRoute: портал в EnemyWalker.portal, точка — body_set_point). Летящее тело, которое гонится (или летит к точке
+// вне сетки полёта), раз в PATH_SLOTS тиков (сдвиг по слоту) спрашивает: в сетке полёта корабля — маршрут (EVENT_ROUTE:
+// только портал, путь — поле сетки); в подвижном пространстве с сеткой навигации (кабина турели) — путь этой сетки
+// (EVENT_PATH, первый — сразу после смены пространства). Начало пути — точка пола под телом (луч вниз), цель — точка мозга.
+// Вне сетки полёта летит по точкам пути (у пола) на своей высоте: ввод — по горизонтали к точке пути (ближе
+// FLY_CORNER_R — к следующей; последняя — к цели), высота — рабочая (_hover_lift); отход — так же без пути; пути ещё
+// нет — висит. Очередь и расхождение летящих — внутри одного пространства. Пространство корабля без сетки полёта —
+// висит, как было.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -117,6 +126,7 @@ public:
 		EVENT_LINK_OPEN, // Открыть связь в карте (ручка — номер связи)
 		EVENT_FALL, // Неваляшка начала падать (GDScript: кукла — EnemyWalker, spec 2026-11-02-walker-ragdoll-design)
 		EVENT_RISE, // Лежащий куклой встаёт (body_set_ragdoll): неваляшка выпрямлена, мозг держит rise_time
+		EVENT_ROUTE, // Маршрут летящего в сетке полёта (GDScript: WalkerRoute.on_path — только портал, без пути сетки)
 	};
 
 	enum Move {
@@ -198,6 +208,8 @@ public:
 	static constexpr real_t FIRE_BACK_GAP = 1.0f; // Отход: до минимальной дальности плюс столько, м
 	static constexpr real_t FIRE_STOP_IN = 0.4f; // Погоня с видимостью: остановка ближе желаемой на столько, м (как ближний бой: REACH − STRIKE_STOP)
 	static constexpr real_t STILL_SPEED = 0.3f; // Прицел — когда тело медленнее (встало), м/с
+	// Полёт вне сетки полёта (по сетке навигации пространства)
+	static constexpr real_t FLY_CORNER_R = 0.5f; // Точка пути ближе (по горизонтали) — к следующей, м
 
 private:
 	enum LinkState {
@@ -334,6 +346,12 @@ private:
 		bool floor_hit = false;
 		bool ceil_hit = false;
 		bool rays_known = false;
+		// Полёт вне сетки полёта: путь по сетке навигации пространства (body_set_path летящему; координаты пространства,
+		// у пола), точка пути, к которой летит, пространство пути (−1 — нет) и последнего запроса (−1 — не спрашивал)
+		LocalVector<Vector3> fly_path;
+		uint32_t fly_path_i = 0;
+		int fly_path_space = -1;
+		int fly_req_space = -1;
 	};
 
 	LocalVector<Body> bodies;
@@ -366,7 +384,8 @@ private:
 	EnemyGravityZones gzones;
 	int fly_count = 0; // Летящих за последний тик
 	LocalVector<Vector3> fly_pts; // Центры летящих на начало тика (мир) …
-	LocalVector<int> fly_h; // … и их ручки
+	LocalVector<int> fly_h; // … их ручки …
+	LocalVector<int> fly_s; // … и пространства
 	uint64_t last_flight_usec = 0;
 
 	bool _valid(int p_h) const;
@@ -433,7 +452,11 @@ private:
 	void _land(Body &r_b, CharacterBody3D *p_body, uint64_t p_now);
 	void _tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
 	Vector3 _fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const;
-	Vector3 _fly_crowd(int p_h, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const;
+	Vector3 _fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const;
+	bool _fly_nav(const Body &p_b) const;
+	void _fly_request(int p_h, Body &r_b, CharacterBody3D *p_body, bool p_nav, uint64_t p_now);
+	Vector3 _fly_ground(const Body &p_b, CharacterBody3D *p_body) const;
+	Vector3 _fly_corner(Body &r_b, const Vector3 &p_center, const Vector3 &p_goal, bool &r_last);
 	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, bool p_free_up, real_t p_dt);
 	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);
@@ -556,6 +579,9 @@ public:
 	// вперёд (+) — доли позы клипов направлений; z, w — их скорость, 1/с
 	void body_set_muzzles(int p_h, const PackedVector3Array &p_muzzles, real_t p_radius);
 	Vector4 body_lean(int p_h) const;
+	// Полёт вне сетки полёта (пробы): оставшийся путь по сетке навигации пространства (мир, от точки, к которой летит;
+	// пусто — пути нет)
+	PackedVector3Array body_fly_path(int p_h) const;
 
 	// Снимок игроков этого тика: позы (мир), живы ли, instance id
 	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);

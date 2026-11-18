@@ -77,16 +77,18 @@ bool EnemyBodies::zero_g_at(const Vector3 &p_world) {
 	return gzones.accel_at(p_world, g) && g.length_squared() < ZERO_G * ZERO_G;
 }
 
-// Начало тика полёта: центры летящих на начало тика (мир; очередь и расстояние между летящими — без порядка тел); цели
-// полей (сетка готова) — цели мозга летящих и тел без тяжести (взлетать ли — путь лётом), центры в системе корабля.
+// Начало тика полёта: центры летящих всех пространств на начало тика (мир; очередь и расстояние между летящими одного
+// пространства — без порядка тел); цели полей (сетка готова) — цели мозга летящих и тел без тяжести пространства корабля
+// (взлетать ли — путь лётом), центры в системе корабля.
 void EnemyBodies::_flight_targets(uint64_t p_now) {
 	const Space &sp = spaces[0];
 	const bool ready = flight.is_valid() && flight->is_ready();
 	fly_pts.clear();
 	fly_h.clear();
+	fly_s.clear();
 	for (uint32_t h = 0; h < bodies.size(); h++) {
 		const Body &b = bodies[h];
-		if (!b.used || b.dead || b.space != 0) {
+		if (!b.used || b.dead) {
 			continue;
 		}
 		if (b.move == MOVE_FLY && !b.ragdoll) {
@@ -94,9 +96,10 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 			if (n != nullptr) {
 				fly_pts.push_back(n->get_global_position() + b.up * CENTER_H);
 				fly_h.push_back((int)h);
+				fly_s.push_back(b.space);
 			}
 		}
-		if (!ready || (b.move != MOVE_FLY && !b.zero_g) || b.point_set) {
+		if (b.space != 0 || !ready || (b.move != MOVE_FLY && !b.zero_g) || b.point_set) {
 			continue;
 		}
 		const int ti = _player_index(b.target);
@@ -328,16 +331,16 @@ bool EnemyBodies::_in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const 
 	return _forward(p_b, p_fx).dot(dh.normalized()) >= Math::cos(Math::deg_to_rad(SECTOR_DEG));
 }
 
-// Очередь и расстояние лётом (центры летящих на начало тика): другой летящий ближе FLY_HOLD_R впереди по пути к цели и
-// ближе к ней — ждёт (r_hold); ближе FLY_SEP_R — скорость расхождения от него (FLY_SEP_GAIN на метр, не быстрее
-// FLY_SEP_SPEED).
-Vector3 EnemyBodies::_fly_crowd(int p_h, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const {
+// Очередь и расстояние лётом (центры летящих пространства p_space на начало тика): другой летящий ближе FLY_HOLD_R впереди
+// по пути к цели и ближе к ней — ждёт (r_hold); ближе FLY_SEP_R — скорость расхождения от него (FLY_SEP_GAIN на метр, не
+// быстрее FLY_SEP_SPEED).
+Vector3 EnemyBodies::_fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool &r_hold) const {
 	r_hold = false;
 	Vector3 sep;
 	const Vector3 to = p_goal - p_center;
 	const real_t my = to.length();
 	for (uint32_t i = 0; i < fly_pts.size(); i++) {
-		if (fly_h[i] == p_h) {
+		if (fly_h[i] == p_h || fly_s[i] != p_space) {
 			continue;
 		}
 		const Vector3 d = fly_pts[i] - p_center;
@@ -352,12 +355,98 @@ Vector3 EnemyBodies::_fly_crowd(int p_h, const Vector3 &p_center, const Vector3 
 	return sep.limit_length(FLY_SEP_SPEED);
 }
 
-// Тик летящего тела: мозг тот же; ввод — к точке пути сетки (центр цели; дальний бой с тяжестью — точка на рабочей высоте
-// над целью), у цели слабеет и снят ближе остановки (дальний бой — дальность от центра цели); отход (дальний бой) — от
-// цели без пути, с тяжестью по горизонтали; без сетки (не готова, пространство не корабль) — не перемещается. С тяжестью:
-// ход по пути — вертикаль пути, вверх не быстрее набора (весь ввод медленнее); висит и отходит — к рабочей высоте
-// (_hover_lift). Скорость — закон полёта игрока плюс уступка игрокам; ближний ярус — move_and_slide в плавающем режиме,
-// дальний — по клеткам; взгляд — к цели (огибает — по пути), наклон — к её центру; визуалу — без шага (скорость вдоль торса 0).
+// Летит вне сетки полёта по сетке навигации (заголовок «Порталы для летящих»): подвижное пространство с готовой сеткой.
+bool EnemyBodies::_fly_nav(const Body &p_b) const {
+	return p_b.space > 0 && p_b.space < (int)spaces.size() && spaces[p_b.space].ready && spaces[p_b.space].crowd.is_valid();
+}
+
+// Точка пола под телом (мир): луч вниз от центра по слою мира на HOVER_PROBE; пола нет — ноги.
+Vector3 EnemyBodies::_fly_ground(const Body &p_b, CharacterBody3D *p_body) const {
+	const Vector3 pos = p_body->get_global_position();
+	PhysicsDirectSpaceState3D::RayParameters rq;
+	rq.from = pos + p_b.up * CENTER_H;
+	rq.to = rq.from - p_b.up * HOVER_PROBE;
+	rq.collision_mask = FLOOR_LAYER;
+	rq.exclude.insert(p_body->get_rid());
+	PhysicsDirectSpaceState3D::RayResult hit;
+	return p_body->get_world_3d()->get_direct_space_state()->intersect_ray(rq, hit) ? hit.position : pos;
+}
+
+// Запрос маршрута / пути лётом (заголовок): тело движется; в сетке полёта — только гонится (к точке летит прямо):
+// EVENT_ROUTE; по сетке навигации — гонится или летит к точке: EVENT_PATH (первый в пространстве — сразу). Раз в PATH_SLOTS
+// тиков со сдвигом по слоту; начало — пол под телом, цель — точка мозга (координаты пространства).
+void EnemyBodies::_fly_request(int p_h, Body &r_b, CharacterBody3D *p_body, bool p_nav, uint64_t p_now) {
+	if (!r_b.moving || (!p_nav && (r_b.point_set || r_b.brain != BRAIN_CHASE))) {
+		return;
+	}
+	const bool first = p_nav && r_b.fly_req_space != r_b.space;
+	if (!first && (p_now + (uint64_t)r_b.slot) % PATH_SLOTS != 0) {
+		return;
+	}
+	const Space &sp = spaces[r_b.space];
+	r_b.path_from = sp.inv.xform(_fly_ground(r_b, p_body));
+	r_b.goal = sp.inv.xform(r_b.world);
+	r_b.path_requests++;
+	if (p_nav) {
+		r_b.fly_req_space = r_b.space;
+		_emit(EVENT_PATH, p_h);
+	} else {
+		_emit(EVENT_ROUTE, p_h);
+	}
+}
+
+// Куда лететь по пути сетки навигации (мир, на высоте центра — ход по горизонтали): точка пути, к которой летит (ближе
+// FLY_CORNER_R по горизонтали — следующая); последняя — сама цель (r_last). Пути ещё нет — центр (висит); путь пустой — цель.
+Vector3 EnemyBodies::_fly_corner(Body &r_b, const Vector3 &p_center, const Vector3 &p_goal, bool &r_last) {
+	const Vector3 up = r_b.up;
+	r_last = true;
+	if (r_b.fly_path_space != r_b.space) {
+		return p_center;
+	}
+	Vector3 a = p_goal;
+	const uint32_t n = r_b.fly_path.size();
+	if (n > 0) {
+		const Space &sp = spaces[r_b.space];
+		const Vector3 c = sp.inv.xform(p_center);
+		const Vector3 lu = sp.inv.basis.xform(up).normalized();
+		while (r_b.fly_path_i + 1 < n) {
+			Vector3 d = r_b.fly_path[r_b.fly_path_i] - c;
+			d -= lu * d.dot(lu);
+			if (d.length() >= FLY_CORNER_R) {
+				break;
+			}
+			r_b.fly_path_i++;
+		}
+		r_last = r_b.fly_path_i + 1 >= n;
+		if (!r_last) {
+			a = sp.xf.xform(r_b.fly_path[r_b.fly_path_i]);
+		}
+	}
+	return a + up * (p_center - a).dot(up);
+}
+
+PackedVector3Array EnemyBodies::body_fly_path(int p_h) const {
+	ERR_FAIL_COND_V(!_valid(p_h), PackedVector3Array());
+	const Body &b = bodies[p_h];
+	PackedVector3Array out;
+	if (b.fly_path_space != b.space || b.space >= (int)spaces.size()) {
+		return out;
+	}
+	const Transform3D &xf = spaces[b.space].xf;
+	for (uint32_t i = b.fly_path_i; i < b.fly_path.size(); i++) {
+		out.push_back(xf.xform(b.fly_path[i]));
+	}
+	return out;
+}
+
+// Тик летящего тела: мозг тот же; ввод — к точке пути сетки полёта (центр цели; дальний бой с тяжестью — точка на рабочей
+// высоте над целью), у цели слабеет и снят ближе остановки (дальний бой — дальность от центра цели); вне сетки полёта в
+// пространстве с сеткой навигации — по горизонтали к точке её пути (_fly_corner); отход (дальний бой) — от цели без пути,
+// с тяжестью по горизонтали; ни той, ни другой сетки (полёта не готова, пространство корабля) — не перемещается. С
+// тяжестью: ход по пути сетки полёта — вертикаль пути, вверх не быстрее набора (весь ввод медленнее); по сетке навигации,
+// висит и отходит — к рабочей высоте (_hover_lift). Скорость — закон полёта игрока плюс уступка игрокам; ближний ярус —
+// move_and_slide в плавающем режиме, дальний — по клеткам; взгляд — к цели (огибает — по пути), наклон — к её центру;
+// визуалу — без шага (скорость вдоль торса 0). Маршрут и путь — _fly_request.
 void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt) {
 	fly_count++;
 	const Vector3 up = r_b.up;
@@ -365,41 +454,51 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 	const Vector3 pos = p_body->get_global_position();
 	const Vector3 center = pos + up * CENTER_H;
 	const bool grid = _grid_ok(r_b);
+	const bool nav = !grid && _fly_nav(r_b); // Вне сетки полёта — по сетке навигации пространства (кабина турели)
 	const bool hold = !r_b.zero_g; // С тяжестью — рабочая высота и набор
 	const bool fire = r_b.fire_max > 0.0f && !r_b.point_set;
 	Vector3 input; // Мир, длина ≤ 1 по горизонтали и по вертикали
 	Vector3 sep; // Расхождение с летящими (мир)
-	bool path = false; // Ход по пути сетки
+	bool path = false; // Ход по пути сетки полёта (вертикаль — пути)
 	const bool fight = r_b.brain == BRAIN_CHASE || r_b.brain == BRAIN_WINDUP || r_b.brain == BRAIN_RECOVER;
 	Vector3 look = r_b.moving ? r_b.world - pos : r_b.face - pos; // Ноги к ногам = центр к центру
-	if (r_b.moving && grid) {
+	_fly_request(p_h, r_b, p_body, nav, p_now);
+	if (r_b.moving && (grid || nav)) {
 		const real_t gh = (fire && hold && r_b.hover_h > 0.0f) ? r_b.hover_h : CENTER_H;
 		const Vector3 goal = r_b.world + up * gh;
 		const real_t gd = (goal - center).length();
 		const real_t gap = fire ? (r_b.world + up * CENTER_H - center).length() - r_b.stop_dist : gd - (r_b.point_set ? POINT_STOP : FLY_STOP);
-		const Space &sp = spaces[r_b.space];
-		Vector3 aim_l;
-		real_t dist = gd;
-		flight->steer(r_b.point_set ? (int64_t)0 : (int64_t)r_b.target, sp.inv.xform(center), sp.inv.xform(goal), aim_l, dist);
-		const Vector3 aim = sp.xf.xform(aim_l);
-		r_b.fly_dist = dist;
+		Vector3 aim;
+		bool last = true; // Точка пути — сама цель
+		if (grid) {
+			const Space &sp = spaces[r_b.space];
+			Vector3 aim_l;
+			real_t dist = gd;
+			flight->steer(r_b.point_set ? (int64_t)0 : (int64_t)r_b.target, sp.inv.xform(center), sp.inv.xform(goal), aim_l, dist);
+			aim = sp.xf.xform(aim_l);
+			r_b.fly_dist = dist;
+			last = aim.distance_squared_to(goal) <= 1e-4f;
+		} else {
+			r_b.fly_dist = -1.0f;
+			aim = _fly_corner(r_b, center, goal, last);
+		}
 		bool queue = false;
-		sep = _fly_crowd(p_h, center, goal, queue);
+		sep = _fly_crowd(p_h, r_b.space, center, goal, queue);
 		if (gap > 0.0f && !queue) {
 			const Vector3 d = aim - center;
 			const real_t dl = d.length();
 			if (dl > 1e-4f) {
 				const real_t ramp = CLAMP(gap / MAX(r_b.fly_speed * ARRIVE_S, 0.01f), 0.0f, 1.0f);
 				input = d * (ramp / dl);
-				path = true;
+				path = grid;
 			}
-			if (aim.distance_squared_to(goal) > 1e-4f) {
+			if (!last) {
 				look = aim - center; // Огибает: смотрит по пути
 			}
 		}
 	} else {
 		r_b.fly_dist = -1.0f;
-		if (r_b.away && grid) { // Отход: от центра цели (с тяжестью — по горизонтали), лицом к ней
+		if (r_b.away && (grid || nav)) { // Отход: от центра цели (с тяжестью — по горизонтали), лицом к ней
 			Vector3 a = center - (r_b.world + up * CENTER_H);
 			if (hold) {
 				a -= up * a.dot(up);
@@ -410,7 +509,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 		}
 		if (fire) {
 			bool queue = false;
-			sep = _fly_crowd(p_h, center, center, queue); // Висящие и отходящие стрелки расходятся
+			sep = _fly_crowd(p_h, r_b.space, center, center, queue); // Висящие и отходящие стрелки расходятся
 		}
 	}
 	if (hold) {
