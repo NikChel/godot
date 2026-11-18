@@ -24,6 +24,8 @@ Vector3 EnemyFlightGrid::center(uint32_t p_i) const {
 void EnemyFlightGrid::build_begin(const PackedFloat32Array &p_vertices, const PackedInt32Array &p_indices, const PackedVector3Array &p_volume, real_t p_cell, const Vector3 &p_half) {
 	build = BUILD_NONE;
 	occ.clear();
+	part.clear();
+	part_count = 0;
 	tris.clear();
 	free_count = 0;
 	build_next = 0;
@@ -196,7 +198,79 @@ void EnemyFlightGrid::_finish_build() {
 	for (uint32_t i = 0; i < occ.size(); i++) {
 		free_count += occ[i] ? 0 : 1;
 	}
+	_label_parts();
 	build = BUILD_READY;
+}
+
+// Части свободных клеток (шапка): обход в ширину по 6 соседям от каждой ещё не помеченной свободной клетки.
+void EnemyFlightGrid::_label_parts() {
+	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
+	const uint32_t n = occ.size();
+	part.resize(n);
+	memset(part.ptr(), 0, sizeof(uint16_t) * n);
+	part_count = 0;
+	const uint32_t sy = (uint32_t)nx;
+	const uint32_t sz = sy * (uint32_t)ny;
+	LocalVector<uint32_t> q;
+	for (uint32_t i = 0; i < n; i++) {
+		if (occ[i] || part[i]) {
+			continue;
+		}
+		part_count++;
+		const uint16_t id = (uint16_t)MIN(part_count, (int)UINT16_MAX);
+		q.clear();
+		q.push_back(i);
+		part[i] = id;
+		for (uint32_t k = 0; k < q.size(); k++) {
+			const uint32_t c = q[k];
+			const uint32_t nb[6] = { c + 1, c - 1, c + sy, c - sy, c + sz, c - sz }; // Свободная клетка — не у края
+			for (int j = 0; j < 6; j++) {
+				const uint32_t m = nb[j];
+				if (!occ[m] && !part[m]) {
+					part[m] = id;
+					q.push_back(m);
+				}
+			}
+		}
+	}
+	part_usec = OS::get_singleton()->get_ticks_usec() - t0;
+}
+
+int EnemyFlightGrid::component_at(const Vector3 &p_local) const {
+	if (build != BUILD_READY || part.size() != occ.size()) {
+		return -1;
+	}
+	const Vector3i c0 = cell_of(p_local);
+	if (in(c0) && part[index(c0.x, c0.y, c0.z)] != 0) {
+		return part[index(c0.x, c0.y, c0.z)];
+	}
+	for (int r = 1; r <= 2; r++) {
+		int best = -1;
+		real_t best_d = (real_t)Math::INF;
+		for (int dz = -r; dz <= r; dz++) {
+			for (int dy = -r; dy <= r; dy++) {
+				for (int dx = -r; dx <= r; dx++) {
+					const Vector3i c(c0.x + dx, c0.y + dy, c0.z + dz);
+					if (!in(c)) {
+						continue;
+					}
+					const uint32_t j = index(c.x, c.y, c.z);
+					if (part[j] == 0) {
+						continue;
+					}
+					const real_t d = center(j).distance_squared_to(p_local);
+					if (d < best_d) {
+						best_d = d;
+						best = part[j];
+					}
+				}
+			}
+		}
+		if (best >= 0) {
+			return best;
+		}
+	}
+	return -1;
 }
 
 PackedByteArray EnemyFlightGrid::get_bits() const {
@@ -317,4 +391,7 @@ void EnemyFlightGrid::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("contains", "local"), &EnemyFlightGrid::contains);
 	ClassDB::bind_method(D_METHOD("is_free", "local"), &EnemyFlightGrid::is_free);
 	ClassDB::bind_method(D_METHOD("line_free", "a", "b"), &EnemyFlightGrid::line_free);
+	ClassDB::bind_method(D_METHOD("component_at", "local"), &EnemyFlightGrid::component_at);
+	ClassDB::bind_method(D_METHOD("get_component_count"), &EnemyFlightGrid::get_component_count);
+	ClassDB::bind_method(D_METHOD("get_component_usec"), &EnemyFlightGrid::get_component_usec);
 }

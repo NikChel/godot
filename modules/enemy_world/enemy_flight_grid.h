@@ -13,6 +13,10 @@
 // корабля); крайние клетки сетки заняты всегда (обход соседей без проверки границ). Построение — кусками по бюджету
 // (build_step); готовое — в кэш (get_bits / restore). Прямая видимость (line_free) — клетки отрезка между концами
 // свободны. Поля расстояний и путь тела — EnemyFlightFields (по этой сетке).
+// Части (срез Б «лифт для летящих», бриф 2026-11-18): готовая сетка — номера связных частей свободных клеток (по 6
+// соседям, один обход в ширину по готовности; номера с 1, больше 65535 частей — последний общий); часть точки
+// (component_at) — её клетки или ближайшей свободной в кубе радиуса 1, затем 2. Маршрут летящего (GDScript NavPortals)
+// различает по ним части корабля, связанные только подвижными системами (палубы лифта).
 class EnemyFlightGrid : public RefCounted {
 	GDCLASS(EnemyFlightGrid, RefCounted);
 
@@ -31,13 +35,17 @@ class EnemyFlightGrid : public RefCounted {
 	int ny = 0;
 	int nz = 0;
 	LocalVector<uint8_t> occ; // 1 — занято
+	LocalVector<uint16_t> part; // Часть клетки (0 — занята)
 	LocalVector<Vector3> tris; // Треугольники построения (по 3 вершины)
 	uint32_t build_next = 0;
 	uint64_t build_usec = 0;
 	int build_steps = 0;
 	int free_count = 0;
+	int part_count = 0;
+	uint64_t part_usec = 0;
 
 	void _mark_border();
+	void _label_parts();
 	void _voxelize(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c);
 	static bool _tri_box(const Vector3 &p_center, const Vector3 &p_half, const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c);
 	void _finish_build();
@@ -61,13 +69,16 @@ public:
 	Vector3 get_half() const { return half; }
 	int get_cell_count() const { return (int)cells(); }
 	int get_free_count() const { return free_count; }
-	int64_t get_memory_bytes() const { return (int64_t)occ.size(); }
+	int64_t get_memory_bytes() const { return (int64_t)occ.size() + (int64_t)part.size() * 2; }
 	int64_t get_build_usec() const { return (int64_t)build_usec; }
 	int get_build_steps() const { return build_steps; }
 	// Клетки
 	bool contains(const Vector3 &p_local) const { return build == BUILD_READY && in(cell_of(p_local)); }
 	bool is_free(const Vector3 &p_local) const;
 	bool line_free(const Vector3 &p_a, const Vector3 &p_b) const; // Клетки между концами (без самих концов) свободны
+	int component_at(const Vector3 &p_local) const; // Часть точки (шапка); −1 — нет свободной клетки рядом / не готова
+	int get_component_count() const { return part_count; }
+	int64_t get_component_usec() const { return (int64_t)part_usec; } // Разметка частей, мкс
 	// Разбор клеток (C++: EnemyFlightFields, EnemyBodies)
 	uint32_t get_epoch() const { return epoch; }
 	uint32_t cells() const { return (uint32_t)nx * (uint32_t)ny * (uint32_t)nz; }

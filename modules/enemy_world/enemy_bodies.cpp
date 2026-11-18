@@ -253,6 +253,28 @@ void EnemyBodies::body_teleport(int p_h, int p_space, const Transform3D &p_world
 	}
 }
 
+// Смена пространства на месте (заголовок «Лифт для летящих»): поза и скорость в мире те же; вход наклона — без разрыва
+// (поза прошлого тика — в системе нового пространства).
+void EnemyBodies::body_set_space(int p_h, int p_space) {
+	ERR_FAIL_COND(!_valid(p_h));
+	ERR_FAIL_INDEX(p_space, (int)spaces.size());
+	Body &b = bodies[p_h];
+	if (b.space == p_space) {
+		return;
+	}
+	CharacterBody3D *body = Object::cast_to<CharacterBody3D>(ObjectDB::get_instance(b.body_id));
+	ERR_FAIL_NULL(body);
+	_space_xforms(); // Вызов из физ-тика до tick — позы пространств этого тика
+	const Transform3D old_fx = b.frame_last;
+	const bool lean = b.lean_space == b.space;
+	_set_space(p_h, b, p_space, body);
+	b.portal_space = -1;
+	if (lean) {
+		b.lean_from = b.frame_last.affine_inverse().xform(old_fx.xform(b.lean_from));
+		b.lean_space = p_space;
+	}
+}
+
 int EnemyBodies::body_space(int p_h) const {
 	ERR_FAIL_COND_V(!_valid(p_h), 0);
 	return bodies[p_h].space;
@@ -1570,6 +1592,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_floor_spaces", "ids", "spaces"), &EnemyBodies::set_floor_spaces);
 	ClassDB::bind_method(D_METHOD("body_space", "handle"), &EnemyBodies::body_space);
 	ClassDB::bind_method(D_METHOD("body_teleport", "handle", "space", "world"), &EnemyBodies::body_teleport);
+	ClassDB::bind_method(D_METHOD("body_set_space", "handle", "space"), &EnemyBodies::body_set_space);
 	ClassDB::bind_method(D_METHOD("get_space_changes"), &EnemyBodies::get_space_changes);
 	ClassDB::bind_method(D_METHOD("body_set_point", "handle", "world"), &EnemyBodies::body_set_point);
 	ClassDB::bind_method(D_METHOD("body_set_path", "handle", "points", "target", "links"), &EnemyBodies::body_set_path, DEFVAL(PackedInt32Array()));

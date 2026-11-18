@@ -89,7 +89,8 @@ static int64_t fly_point_id(const Vector3 &p_local) {
 // Начало тика полёта: центры летящих всех пространств на начало тика (мир; очередь и расстояние между летящими одного
 // пространства — без порядка тел) и идут ли они (мозг ведёт к цели или точке); цели полей (сетка готова) — цели мозга
 // летящих и тел без тяжести пространства корабля (взлетать ли — путь лётом) и точки летящих к точке (портал: путь в
-// обход преград), центры в системе корабля.
+// обход преград; точка в прямой видимости по клеткам — без поля: летит прямо, слот поля не занят), центры в системе
+// корабля.
 void EnemyBodies::_flight_targets(uint64_t p_now) {
 	const Space &sp = spaces[0];
 	const bool ready = flight.is_valid() && flight->is_ready();
@@ -102,10 +103,14 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 		if (!b.used || b.dead) {
 			continue;
 		}
+		Vector3 center; // Центр тела (мир; летящее не куклой)
+		bool center_ok = false;
 		if (b.move == MOVE_FLY && !b.ragdoll) {
 			Node3D *n = Object::cast_to<Node3D>(ObjectDB::get_instance(b.body_id));
 			if (n != nullptr) {
-				fly_pts.push_back(n->get_global_position() + b.up * CENTER_H);
+				center = n->get_global_position() + b.up * CENTER_H;
+				center_ok = true;
+				fly_pts.push_back(center);
 				fly_h.push_back((int)h);
 				fly_s.push_back(b.space);
 				fly_go.push_back(b.moving ? 1 : 0);
@@ -117,7 +122,9 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 		if (b.point_set) {
 			if (b.move == MOVE_FLY) {
 				const Vector3 c = sp.inv.xform(b.world + b.up * CENTER_H);
-				flight->want(fly_point_id(c), c, p_now);
+				if (!center_ok || !flight->get_grid()->line_free(sp.inv.xform(center), c)) {
+					flight->want(fly_point_id(c), c, p_now);
+				}
 			}
 			continue;
 		}

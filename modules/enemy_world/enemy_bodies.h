@@ -102,6 +102,11 @@ class Node3D;
 // ждёт только за идущим летящим (мозг ведёт его к цели или точке; стоящий впереди стрелок — не очередь: обходит его,
 // иначе не выйти на видимость). Отход от цели прямо под / над телом — назад от взгляда. Пространство корабля без сетки
 // полёта — висит, как было.
+// Лифт для летящих (срез Б, бриф 2026-11-18): маршрут и места — те же, что у ходока (GDScript WalkerRoute, LiftBoarding;
+// переход полётом — LiftFlight). Пространство летящего у проёма меняет GDScript по геометрии проёма — body_set_space:
+// на месте, поза и скорость в мире те же (правила пола у летящего нет). След хода кабины лифта занят в сетке полёта
+// корабля (GDScript NavFlight); части сетки — EnemyFlightGrid::component_at. К точке в прямой видимости по клеткам поле
+// точки не нужно (летит прямо): поле точки — только пока её не видно.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -485,6 +490,7 @@ public:
 	void set_floor_spaces(const PackedInt64Array &p_ids, const PackedInt32Array &p_spaces); // Тело пола (instance id) → пространство
 	int body_space(int p_h) const;
 	void body_teleport(int p_h, int p_space, const Transform3D &p_world); // Мгновенно в позу (мир) и в пространство
+	void body_set_space(int p_h, int p_space); // В пространство на месте: поза и скорость в мире те же (летящий у проёма лифта)
 	int get_space_changes() const { return space_changes; } // Смен пространства всего (пробы)
 	void body_set_point(int p_h, const Vector3 &p_world); // Точка пробы: идти туда без боя
 	void body_set_path(int p_h, const PackedVector3Array &p_points, const Vector3 &p_target, const PackedInt32Array &p_links = PackedInt32Array());
