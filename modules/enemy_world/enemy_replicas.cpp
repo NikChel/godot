@@ -297,14 +297,17 @@ PackedInt32Array EnemyReplicas::tick(double p_seek) {
 			world += _yield(r, world, dt); // Поза копии — снимок плюс местная уступка своему игроку
 			body->set_global_position(world);
 		}
-		if (sampled && !r.cross) { // Вход наклона — показанный ход копии за тик (как у тела хоста)
+		if (sampled && !r.cross) { // Вход наклона — показанный ход копии за время показа (как у тела хоста — за тик)
 			const Vector3 shown = r.pos + r.bo_off;
-			if (r.lean_space == r.space) {
-				r.anim.lean_move(shown - r.lean_from, r.yaw, dt, r.lean_full);
-			} else {
+			if (r.lean_space != r.space) {
 				r.anim.lean_input(0.0f, 0.0f);
+				r.lean_from = shown;
+				r.lean_seek = p_seek;
+			} else if (p_seek - r.lean_seek > LEAN_SEEK_MIN) { // Время показа не ушло (тики кадра подряд) — вход прежний
+				r.anim.lean_move(shown - r.lean_from, r.yaw, (real_t)(p_seek - r.lean_seek), r.lean_full);
+				r.lean_from = shown;
+				r.lean_seek = p_seek;
 			}
-			r.lean_from = shown;
 			r.lean_space = r.space;
 		} else {
 			r.anim.lean_input(0.0f, 0.0f);
