@@ -1237,6 +1237,9 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 	// EnemyBackoff), отход — внутри порога минимальной (+ FIRE_STOP_IN: проходит её с ходом, к концу медленнее)
 	const real_t blind_stop = FLY_STOP;
 	const real_t back_stop = r_b.fire_min + FIRE_STOP_IN;
+	// Встать к прицелу — только в свободной клетке сетки полёта (пространство корабля): в занятой (след хода кабины лифта
+	// у проёма, геометрия) — дальше к цели, вплотную (кабина не упрётся в висящего стрелка)
+	const bool free_here = !_grid_ok(r_b) || flight->get_grid()->is_free(spaces[0].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
 	// Прицел: висит, лицом и наклоном к цели; очередь — первый выстрел в конце прицела
 	auto windup = [&]() {
 		r_b.brain = BRAIN_WINDUP;
@@ -1263,10 +1266,10 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 			// защёлкой «вблизи») — останавливается, прицел — когда встал (ход до прицела не уводит за укрытие). Точка
 			// остановки с видимостью — внутри порога (желаемая − FIRE_STOP_IN, не ближе минимальной): подлёт слабеет к ней,
 			// порог желаемой проходит с ходом, а не замирает у него
-			const bool stop = !r_b.too_close && r_b.seen && d <= r_b.fire_want;
+			const bool stop = !r_b.too_close && r_b.seen && d <= r_b.fire_want && free_here;
 			r_b.away = r_b.too_close;
 			r_b.moving = !r_b.too_close && !stop;
-			r_b.stop_dist = r_b.too_close ? back_stop : (r_b.seen ? MAX(r_b.fire_want - FIRE_STOP_IN, r_b.fire_min) : blind_stop);
+			r_b.stop_dist = r_b.too_close ? back_stop : (r_b.seen && free_here ? MAX(r_b.fire_want - FIRE_STOP_IN, r_b.fire_min) : blind_stop);
 			if (stop && p_body->get_velocity().length() < STILL_SPEED) {
 				r_b.seen = _sees(r_b, p_body, p_ti);
 				if (r_b.seen) {
@@ -1282,8 +1285,8 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 			// Перезарядка: видит ближе минимальной (без защёлки) — отход; дальше максимальной или не видна — подлёт; иначе
 			// висит
 			r_b.away = has && r_b.too_close;
-			r_b.moving = has && !r_b.too_close && (!r_b.seen || d > r_b.fire_max);
-			r_b.stop_dist = r_b.too_close ? back_stop : (r_b.seen ? r_b.fire_max : blind_stop);
+			r_b.moving = has && !r_b.too_close && (!r_b.seen || d > r_b.fire_max || !free_here);
+			r_b.stop_dist = r_b.too_close ? back_stop : (r_b.seen && free_here ? r_b.fire_max : blind_stop);
 			if (p_now < r_b.state_end) {
 				break;
 			}
@@ -1293,7 +1296,7 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 				r_b.away = false;
 				break;
 			}
-			const bool band = !r_b.too_close && (d >= r_b.fire_min || r_b.close_lock) && d <= r_b.fire_max;
+			const bool band = !r_b.too_close && (d >= r_b.fire_min || r_b.close_lock) && d <= r_b.fire_max && free_here;
 			if (band && r_b.seen && p_body->get_velocity().length() >= STILL_SPEED) {
 				break; // В полосе с видимостью ещё тормозит — прицел, когда встанет
 			}
