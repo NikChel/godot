@@ -1087,6 +1087,7 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 		r_b.brain = BRAIN_IDLE;
 		r_b.moving = r_b.point_set; // Точка пробы — снова к ней
 		r_b.too_close = false; // Отход дальнего боя — заново по видимости (срок без продвижения не шёл в оглушении)
+		r_b.backing = false;
 	}
 	if (r_b.point_set) {
 		return;
@@ -1178,6 +1179,7 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 	if (r_b.fire_space != r_b.space) { // Другое пространство (портал, проём лифта) — отход и защёлка заново
 		r_b.fire_space = r_b.space;
 		r_b.too_close = false;
+		r_b.backing = false;
 		r_b.close_lock = false;
 	}
 	if (has) {
@@ -1194,6 +1196,7 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 		}
 		auto lock = [&]() {
 			r_b.too_close = false;
+			r_b.backing = false;
 			r_b.close_lock = true;
 			r_b.close_id = r_b.target;
 			r_b.close_at = tl;
@@ -1203,24 +1206,29 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 			if (!r_b.seen) {
 				if (aiming) {
 					r_b.too_close = false; // Цель ушла за укрытие не из-за отхода — после очереди подлёт до видимости
+					r_b.backing = false;
 				} else {
 					lock(); // Отход увёл за укрытие — вернуться до видимости и стрелять вблизи
 				}
 			} else if (d >= r_b.fire_min) {
-				r_b.too_close = false; // Видит не ближе минимальной — встаёт и стреляет
+				r_b.too_close = false; // Видит не ближе минимальной — встаёт и стреляет (снос торможения — ещё отход)
 			} else if (aiming || d > r_b.back_d + BACK_GAIN) {
 				r_b.back_d = d; // Отход уводит дальше (или ещё не начат) — срок без продвижения заново
 				r_b.back_end = p_now + _ticks(BACK_STALL_S);
 			} else if (p_now >= r_b.back_end) {
 				lock(); // Отход не уводит дальше (стена, кабина за спиной, цель догоняет) — стрелять вблизи
 			}
+		} else if (r_b.backing && !r_b.seen && !aiming) {
+			lock(); // Снос торможения после отхода увёл за укрытие — вернуться до видимости и стрелять вблизи
 		} else if (r_b.seen && d < r_b.fire_min && !r_b.close_lock) {
 			r_b.too_close = true; // Видит ближе минимальной — отход, пока видит
+			r_b.backing = true;
 			r_b.back_d = d;
 			r_b.back_end = p_now + _ticks(BACK_STALL_S);
 		}
 	} else {
 		r_b.too_close = false;
+		r_b.backing = false;
 		r_b.close_lock = false;
 		r_b.seen = false;
 		r_b.seen_id = ObjectID();
@@ -1236,6 +1244,7 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 		r_b.shots_left = MAX(r_b.shots, 1);
 		r_b.moving = false;
 		r_b.away = false;
+		r_b.backing = false; // Встал с видимостью — отход кончился
 	};
 	switch (r_b.brain) {
 		case BRAIN_IDLE: {
