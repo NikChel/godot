@@ -344,19 +344,26 @@ void EnemyBodies::_fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_
 }
 
 // Ход без пути по сетке полёта (отход): составляющие направления p_dir по осям сетки, ведущие из клетки центра в занятую
-// соседнюю, сняты (вдоль преграды — скользит, в неё — нет).
-Vector3 EnemyBodies::_grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir) const {
+// соседнюю — или в занятую клетку в пределах сноса торможения своей скорости p_vel по этой оси (не меньше полуклетки), —
+// сняты (вдоль преграды — скользит, в неё — нет; останавливается до занятой, а не въезжает в неё сносом).
+Vector3 EnemyBodies::_grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir, const Vector3 &p_vel) const {
 	const Space &sp = spaces[p_b.space];
 	const EnemyFlightGrid *g = flight->get_grid().ptr();
 	const Vector3 c = sp.inv.xform(p_center);
 	Vector3 dl = sp.inv.basis.xform(p_dir);
+	const Vector3 vl = sp.inv.basis.xform(p_vel);
+	const real_t stop_s = MAX(p_b.fly_accel_time, p_b.fly_brake_time) / DRIFT_TAUS; // Снос до остановки — скорость × столько
 	for (int k = 0; k < 3; k++) {
 		if (Math::abs(dl[k]) < 1e-4f) {
 			continue;
 		}
+		const real_t sign = dl[k] > 0.0f ? 1.0f : -1.0f;
+		const real_t look = MAX(g->get_cell() * 0.5f, MAX(vl[k] * sign, 0.0f) * stop_s);
 		Vector3 t = c;
-		t[k] += (dl[k] > 0.0f ? 1.0f : -1.0f) * g->get_cell();
-		if (!g->is_free(t)) {
+		t[k] += sign * g->get_cell();
+		Vector3 near = c;
+		near[k] += sign * look;
+		if (!g->is_free(t) || !g->is_free(near)) {
 			dl[k] = 0.0f;
 		}
 	}
@@ -570,7 +577,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			if (a.length_squared() > 1e-6f) {
 				input = a.normalized() * ramp;
 				if (grid) {
-					input = _grid_clip(r_b, center, input); // Отход не в занятые клетки (след кабины лифта за спиной)
+					input = _grid_clip(r_b, center, input, p_body->get_velocity()); // Отход не в занятые клетки (след кабины лифта за спиной)
 				}
 			}
 		}

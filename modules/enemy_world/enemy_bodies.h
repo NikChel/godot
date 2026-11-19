@@ -485,7 +485,7 @@ private:
 	Vector3 _fly_ground(const Body &p_b, CharacterBody3D *p_body) const;
 	Vector3 _fly_corner(Body &r_b, const Vector3 &p_center, const Vector3 &p_goal, bool &r_last);
 	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, bool p_free_up, real_t p_dt);
-	Vector3 _grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir) const;
+	Vector3 _grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir, const Vector3 &p_vel) const;
 	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);
 	real_t _hover_lift(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
