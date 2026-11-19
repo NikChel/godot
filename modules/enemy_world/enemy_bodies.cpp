@@ -1086,6 +1086,7 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 	if (r_b.brain == BRAIN_STAGGER) {
 		r_b.brain = BRAIN_IDLE;
 		r_b.moving = r_b.point_set; // Точка пробы — снова к ней
+		r_b.too_close = false; // Отход дальнего боя — заново по видимости (срок без продвижения не шёл в оглушении)
 	}
 	if (r_b.point_set) {
 		return;
@@ -1167,10 +1168,18 @@ void EnemyBodies::_strike_tick(int p_h, Body &r_b, uint64_t p_now) {
 }
 
 // Дальний бой (заголовок): дальность — центр к центру; видимость — луч раз в SEE_TICKS (новая цель — сразу) и свежий
-// в момент решения «прицел»; цель ближе fire_min — отход (до fire_min + FIRE_BACK_GAP), кроме прицела и очереди.
+// в момент решения «прицел». Видимость важнее дистанции: не видит — подлёт до видимости (без пола в минимальную
+// дальность); видит не ближе fire_min — встаёт и стреляет; видит ближе — отход, пока видит (кроме прицела и очереди).
+// Отход спрятал цель или не уводит дальше (теснота) — защёлка «вблизи»: возврат до видимости и огонь с этого места без
+// отхода; снимается другой целью, сменой пространства, уходом цели от места защёлки дальше CLOSE_HOLD_MOVE.
 void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p_ti, uint64_t p_now) {
 	const bool has = p_ti >= 0;
 	real_t d = 0.0f;
+	if (r_b.fire_space != r_b.space) { // Другое пространство (портал, проём лифта) — отход и защёлка заново
+		r_b.fire_space = r_b.space;
+		r_b.too_close = false;
+		r_b.close_lock = false;
+	}
 	if (has) {
 		r_b.world = players_pos[p_ti];
 		r_b.face = players_pos[p_ti];
@@ -1179,16 +1188,47 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 			r_b.seen_id = r_b.target;
 		}
 		d = _fire_dist(r_b, p_body, p_ti);
-		if (d < r_b.fire_min) {
-			r_b.too_close = true;
-		} else if (d > r_b.fire_min + FIRE_BACK_GAP) {
+		const Vector3 tl = spaces[r_b.space].inv.xform(players_pos[p_ti]); // Цель в координатах пространства тела
+		if (r_b.close_lock && (r_b.close_id != r_b.target || tl.distance_to(r_b.close_at) > CLOSE_HOLD_MOVE)) {
+			r_b.close_lock = false; // Другая цель или цель ушла от места защёлки — дистанция снова в силе
+		}
+		auto lock = [&]() {
 			r_b.too_close = false;
+			r_b.close_lock = true;
+			r_b.close_id = r_b.target;
+			r_b.close_at = tl;
+		};
+		const bool aiming = r_b.brain == BRAIN_WINDUP; // Прицел и очередь доводятся до конца: отхода в них нет
+		if (r_b.too_close) {
+			if (!r_b.seen) {
+				if (aiming) {
+					r_b.too_close = false; // Цель ушла за укрытие не из-за отхода — после очереди подлёт до видимости
+				} else {
+					lock(); // Отход увёл за укрытие — вернуться до видимости и стрелять вблизи
+				}
+			} else if (d >= r_b.fire_min) {
+				r_b.too_close = false; // Видит не ближе минимальной — встаёт и стреляет
+			} else if (aiming || d > r_b.back_d + BACK_GAIN) {
+				r_b.back_d = d; // Отход уводит дальше (или ещё не начат) — срок без продвижения заново
+				r_b.back_end = p_now + _ticks(BACK_STALL_S);
+			} else if (p_now >= r_b.back_end) {
+				lock(); // Отход не уводит дальше (стена, кабина за спиной, цель догоняет) — стрелять вблизи
+			}
+		} else if (r_b.seen && d < r_b.fire_min && !r_b.close_lock) {
+			r_b.too_close = true; // Видит ближе минимальной — отход, пока видит
+			r_b.back_d = d;
+			r_b.back_end = p_now + _ticks(BACK_STALL_S);
 		}
 	} else {
 		r_b.too_close = false;
+		r_b.close_lock = false;
 		r_b.seen = false;
 		r_b.seen_id = ObjectID();
 	}
+	// Точка остановки хода (подлёт / отход): не видит — вплотную (FLY_STOP; в тело игрока не входит — уступка
+	// EnemyBackoff), отход — внутри порога минимальной (+ FIRE_STOP_IN: проходит её с ходом, к концу медленнее)
+	const real_t blind_stop = FLY_STOP;
+	const real_t back_stop = r_b.fire_min + FIRE_STOP_IN;
 	// Прицел: висит, лицом и наклоном к цели; очередь — первый выстрел в конце прицела
 	auto windup = [&]() {
 		r_b.brain = BRAIN_WINDUP;
@@ -1210,13 +1250,14 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 				r_b.moving = false;
 				return;
 			}
-			// Подлёт по пути сетки, пока дальше желаемой или не видна; ближе с видимостью — останавливается, прицел — когда
-			// встал (ход до прицела не уводит за укрытие). Точка остановки с видимостью — внутри порога (желаемая −
-			// FIRE_STOP_IN, не ближе минимальной): подлёт слабеет к ней, порог желаемой проходит с ходом, а не замирает у него
+			// Подлёт по пути сетки, пока дальше желаемой или не видна; ближе с видимостью (не ближе минимальной или под
+			// защёлкой «вблизи») — останавливается, прицел — когда встал (ход до прицела не уводит за укрытие). Точка
+			// остановки с видимостью — внутри порога (желаемая − FIRE_STOP_IN, не ближе минимальной): подлёт слабеет к ней,
+			// порог желаемой проходит с ходом, а не замирает у него
 			const bool stop = !r_b.too_close && r_b.seen && d <= r_b.fire_want;
 			r_b.away = r_b.too_close;
 			r_b.moving = !r_b.too_close && !stop;
-			r_b.stop_dist = r_b.seen ? MAX(r_b.fire_want - FIRE_STOP_IN, r_b.fire_min) : r_b.fire_min;
+			r_b.stop_dist = r_b.too_close ? back_stop : (r_b.seen ? MAX(r_b.fire_want - FIRE_STOP_IN, r_b.fire_min) : blind_stop);
 			if (stop && p_body->get_velocity().length() < STILL_SPEED) {
 				r_b.seen = _sees(r_b, p_body, p_ti);
 				if (r_b.seen) {
@@ -1229,10 +1270,11 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 			_strike_tick(p_h, r_b, p_now);
 		} break;
 		case BRAIN_RECOVER: {
-			// Перезарядка: ближе минимальной — отход; дальше максимальной или не видна — подлёт; иначе висит
+			// Перезарядка: видит ближе минимальной (без защёлки) — отход; дальше максимальной или не видна — подлёт; иначе
+			// висит
 			r_b.away = has && r_b.too_close;
 			r_b.moving = has && !r_b.too_close && (!r_b.seen || d > r_b.fire_max);
-			r_b.stop_dist = r_b.seen ? r_b.fire_max : r_b.fire_min;
+			r_b.stop_dist = r_b.too_close ? back_stop : (r_b.seen ? r_b.fire_max : blind_stop);
 			if (p_now < r_b.state_end) {
 				break;
 			}
@@ -1242,7 +1284,7 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 				r_b.away = false;
 				break;
 			}
-			const bool band = !r_b.too_close && d >= r_b.fire_min && d <= r_b.fire_max;
+			const bool band = !r_b.too_close && (d >= r_b.fire_min || r_b.close_lock) && d <= r_b.fire_max;
 			if (band && r_b.seen && p_body->get_velocity().length() >= STILL_SPEED) {
 				break; // В полосе с видимостью ещё тормозит — прицел, когда встанет
 			}
