@@ -61,8 +61,10 @@ Vector3 EnemyBodies::_aim(const Body &p_b, const Transform3D &p_fx) {
 	return (p_fx.basis * Basis(FLY_UP, p_b.yaw) * Basis(Vector3(1.0f, 0.0f, 0.0f), p_b.pitch)).xform(Vector3(0.0f, 0.0f, -1.0f));
 }
 
+// Сетка полёта пространства тела готова (корабль — set_flight, снаружи — space_set_flight; подвижные — нет).
 bool EnemyBodies::_grid_ok(const Body &p_b) const {
-	return p_b.space == 0 && flight.is_valid() && flight->is_ready();
+	const EnemyFlightFields *f = _fields(p_b.space);
+	return f != nullptr && f->is_ready();
 }
 
 // Тяжесть в центре тела (зоны этого тика); вне зон — тяжесть мира (не невесомость).
@@ -87,13 +89,11 @@ static int64_t fly_point_id(const Vector3 &p_local) {
 }
 
 // Начало тика полёта: центры летящих всех пространств на начало тика (мир; очередь и расстояние между летящими одного
-// пространства — без порядка тел) и идут ли они (мозг ведёт к цели или точке); цели полей (сетка готова) — цели мозга
-// летящих и тел без тяжести пространства корабля (взлетать ли — путь лётом) и точки летящих к точке (портал: путь в
+// пространства — без порядка тел) и идут ли они (мозг ведёт к цели или точке); цели полей (сетка пространства тела
+// готова) — цели мозга летящих и тел без тяжести (взлетать ли — путь лётом) и точки летящих к точке (портал: путь в
 // обход преград; точка в прямой видимости по клеткам — без поля: летит прямо, слот поля не занят), центры в системе
-// корабля.
+// пространства тела.
 void EnemyBodies::_flight_targets(uint64_t p_now) {
-	const Space &sp = spaces[0];
-	const bool ready = flight.is_valid() && flight->is_ready();
 	fly_pts.clear();
 	fly_h.clear();
 	fly_s.clear();
@@ -116,14 +116,16 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 				fly_go.push_back(b.moving ? 1 : 0);
 			}
 		}
-		if (b.space != 0 || !ready || (b.move != MOVE_FLY && !b.zero_g)) {
+		EnemyFlightFields *f = _fields(b.space);
+		if (f == nullptr || !f->is_ready() || b.space >= (int)spaces.size() || (b.move != MOVE_FLY && !b.zero_g)) {
 			continue;
 		}
+		const Space &sp = spaces[b.space];
 		if (b.point_set) {
 			if (b.move == MOVE_FLY) {
 				const Vector3 c = sp.inv.xform(b.world + b.up * CENTER_H);
-				if (!center_ok || !flight->get_grid()->line_free(sp.inv.xform(center), c)) {
-					flight->want(fly_point_id(c), c, p_now);
+				if (!center_ok || !f->get_grid()->line_free(sp.inv.xform(center), c)) {
+					f->want(fly_point_id(c), c, p_now);
 				}
 			}
 			continue;
@@ -132,15 +134,32 @@ void EnemyBodies::_flight_targets(uint64_t p_now) {
 		if (ti < 0 || !_player_alive(ti)) {
 			continue;
 		}
-		flight->want((int64_t)b.target, sp.inv.xform(players_pos[ti] + b.up * CENTER_H), p_now);
+		f->want((int64_t)b.target, sp.inv.xform(players_pos[ti] + b.up * CENTER_H), p_now);
 	}
 }
 
+// Пересчёт полей всех пространств с готовой сеткой полёта: общий бюджет, первое — по кругу (каждому по очереди первым),
+// следующему — остаток.
 void EnemyBodies::flight_step(int p_budget_usec) {
 	const uint64_t t0 = OS::get_singleton()->get_ticks_usec();
-	if (flight.is_valid() && flight->is_ready()) {
-		flight->step(p_budget_usec, Engine::get_singleton()->get_physics_frames());
+	const uint64_t now = Engine::get_singleton()->get_physics_frames();
+	int with[8];
+	int n = 0;
+	const int count = MAX((int)spaces.size(), 1);
+	for (int s = 0; s < count && n < 8; s++) {
+		const EnemyFlightFields *f = _fields(s);
+		if (f != nullptr && f->is_ready()) {
+			with[n++] = s;
+		}
 	}
+	for (int k = 0; k < n; k++) {
+		const int64_t left = (int64_t)p_budget_usec - (int64_t)(OS::get_singleton()->get_ticks_usec() - t0);
+		if (left <= 0) {
+			break;
+		}
+		_fields(with[(flight_rr + (uint32_t)k) % (uint32_t)n])->step((int)left, now);
+	}
+	flight_rr++;
 	last_flight_usec = OS::get_singleton()->get_ticks_usec() - t0;
 }
 
@@ -206,24 +225,27 @@ void EnemyBodies::_land(Body &r_b, CharacterBody3D *p_body, uint64_t p_now) {
 	r_b.landings++;
 }
 
-// PlayerFreeMove.step в невесомости (покой — ноль): горизонталь и вертикаль по верху тела отдельно; ось с вводом — к
-// вводу × скорость с полураспадом разгона, без ввода — к нулю с полураспадом торможения (< 0 — без него).
-Vector3 EnemyBodies::_free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt) {
+// PlayerFreeMove.step (покой p_rest: в невесомости — ноль, снаружи — поток): горизонталь и вертикаль по верху тела
+// отдельно; ось с вводом — к вводу × скорость + покой с полураспадом разгона, без ввода — к покою с полураспадом p_rest_hl
+// (торможение или снос потоком; < 0 — без него).
+Vector3 EnemyBodies::_free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, const Vector3 &p_rest, real_t p_rest_hl, real_t p_dt) {
 	const real_t vy = p_v.dot(p_up);
 	Vector3 h = p_v - p_up * vy;
 	const real_t lift = p_in.dot(p_up);
 	const Vector3 in_h = p_in - p_up * lift;
+	const real_t rest_y = p_rest.dot(p_up);
+	const Vector3 rest_h = p_rest - p_up * rest_y;
 	if (in_h.length_squared() > 1e-6f) {
 		const real_t k = CLAMP(1.0f - Math::exp(-FLY_LN2 * p_dt / MAX(p_accel_hl, 1e-4f)), 0.0f, 1.0f);
-		h = h.lerp(in_h * p_speed, k);
-	} else if (p_brake_hl >= 0.0f) {
-		h = h.lerp(Vector3(), p_brake_hl > 0.0f ? CLAMP(1.0f - Math::exp(-FLY_LN2 * p_dt / p_brake_hl), 0.0f, 1.0f) : 1.0f);
+		h = h.lerp(in_h * p_speed + rest_h, k);
+	} else if (p_rest_hl >= 0.0f) {
+		h = h.lerp(rest_h, p_rest_hl > 0.0f ? CLAMP(1.0f - Math::exp(-FLY_LN2 * p_dt / p_rest_hl), 0.0f, 1.0f) : 1.0f);
 	}
 	real_t y = vy;
 	if (Math::abs(lift) > 1e-3f) {
-		y = _damp(y, lift * p_speed, p_accel_hl, p_dt);
-	} else if (p_brake_hl >= 0.0f) {
-		y = _damp(y, 0.0f, p_brake_hl, p_dt);
+		y = _damp(y, lift * p_speed + rest_y, p_accel_hl, p_dt);
+	} else if (p_rest_hl >= 0.0f) {
+		y = _damp(y, rest_y, p_rest_hl, p_dt);
 	}
 	return h + p_up * y;
 }
@@ -319,7 +341,7 @@ void EnemyBodies::_fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_
 	const Space &sp = spaces[r_b.space];
 	const Vector3 c = sp.inv.xform(p_body->get_global_position() + r_b.up * CENTER_H);
 	Vector3 vl = sp.inv.basis.xform(p_v);
-	const EnemyFlightGrid *g = flight->get_grid().ptr();
+	const EnemyFlightGrid *g = _fields(r_b.space)->get_grid().ptr();
 	const real_t cs = g->get_cell();
 	const Vector3 org = g->get_origin();
 	int k_up = -1; // Ось сетки вдоль верха тела
@@ -348,7 +370,7 @@ void EnemyBodies::_fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_
 // сняты (вдоль преграды — скользит, в неё — нет; останавливается до занятой, а не въезжает в неё сносом).
 Vector3 EnemyBodies::_grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir, const Vector3 &p_vel) const {
 	const Space &sp = spaces[p_b.space];
-	const EnemyFlightGrid *g = flight->get_grid().ptr();
+	const EnemyFlightGrid *g = _fields(p_b.space)->get_grid().ptr();
 	const Vector3 c = sp.inv.xform(p_center);
 	Vector3 dl = sp.inv.basis.xform(p_dir);
 	const Vector3 vl = sp.inv.basis.xform(p_vel);
@@ -506,7 +528,8 @@ PackedVector3Array EnemyBodies::body_fly_path(int p_h) const {
 // тяжестью: ход по пути сетки полёта — вертикаль пути, вверх не быстрее набора (весь ввод медленнее); по сетке навигации,
 // висит и отходит — к рабочей высоте (_hover_lift). Скорость — закон полёта игрока плюс уступка игрокам; ближний ярус —
 // move_and_slide в плавающем режиме, дальний — по клеткам; взгляд — к цели (огибает — по пути), наклон — к её центру;
-// визуалу — без шага (скорость вдоль торса 0). Маршрут и путь — _fly_request.
+// визуалу — без шага (скорость вдоль торса 0). Маршрут и путь — _fly_request. Снаружи (enemy_bodies_open.cpp): без
+// рабочей высоты, ввод мозга — путевая скорость в потоке (_flow_input), покой закона — поток.
 void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt) {
 	fly_count++;
 	const Vector3 up = r_b.up;
@@ -514,10 +537,12 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 	const Vector3 pos = p_body->get_global_position();
 	const Vector3 center = pos + up * CENTER_H;
 	const bool grid = _grid_ok(r_b);
+	EnemyFlightFields *fields = grid ? _fields(r_b.space) : nullptr;
 	const bool nav = !grid && _fly_nav(r_b); // Вне сетки полёта — по сетке навигации пространства (кабина турели)
-	const bool hold = !r_b.zero_g; // С тяжестью — рабочая высота и набор
+	const bool hold = !r_b.zero_g && !_open(r_b); // С тяжестью — рабочая высота и набор (снаружи — нет)
 	const bool fire = r_b.fire_max > 0.0f && !r_b.point_set;
 	Vector3 input; // Мир, длина ≤ 1 по горизонтали и по вертикали
+	real_t cap = (real_t)Math::INF; // Ход к точке остановки не быстрее, м/с (путевая скорость в потоке)
 	Vector3 sep; // Расхождение с летящими (мир)
 	bool path = false; // Ход по пути сетки полёта (вертикаль — пути)
 	const bool fight = r_b.brain == BRAIN_CHASE || r_b.brain == BRAIN_WINDUP || r_b.brain == BRAIN_RECOVER;
@@ -538,7 +563,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			const int64_t fid = r_b.point_set ? fly_point_id(goal_l) : (int64_t)r_b.target;
 			// Поле цели готово, а от тела до неё по нему не достать (другая часть сетки: палуба за лифтом, игрок в кабине) —
 			// висит, к цели не летит (маршрут — порталом); поля ещё нет — по прямой, как было
-			const bool reach = flight->steer(fid, sp.inv.xform(center), goal_l, aim_l, dist) || !flight->field_ready(fid);
+			const bool reach = fields->steer(fid, sp.inv.xform(center), goal_l, aim_l, dist) || !fields->field_ready(fid);
 			aim = reach ? sp.xf.xform(aim_l) : center;
 			r_b.fly_dist = reach ? dist : -1.0f;
 			last = !reach || aim.distance_squared_to(goal) <= 1e-4f;
@@ -554,6 +579,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			if (dl > 1e-4f) {
 				const real_t ramp = CLAMP(gap / MAX(r_b.fly_speed * ARRIVE_S, 0.01f), 0.0f, 1.0f);
 				input = d * (ramp / dl);
+				cap = gap / ARRIVE_S;
 				path = grid;
 			}
 			if (!last) {
@@ -567,6 +593,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			// К точке отхода (stop_dist мозга: минимальная + FIRE_STOP_IN) — медленнее, как подлёт к точке остановки: порог
 			// минимальной проходит с малым ходом и встаёт рядом, не вылетая за укрытие
 			const real_t ramp = CLAMP((r_b.stop_dist - a.length()) / MAX(r_b.fly_speed * ARRIVE_S, 0.01f), 0.0f, 1.0f);
+			cap = MAX(r_b.stop_dist - a.length(), 0.0f) / ARRIVE_S;
 			if (hold) {
 				a -= up * a.dot(up);
 			}
@@ -597,6 +624,8 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			input += up * _hover_lift(r_b, p_body, p_fx, p_now);
 		}
 	}
+	const Vector3 intent = input; // Ввод мозга без потока: желаемая скорость и состояние
+	input = _flow_input(r_b, input, cap); // Снаружи: путевая скорость по ходу, без хода — держится против потока
 	if (fight && look.length_squared() > 1e-6f) {
 		const real_t lv = look.dot(up);
 		r_b.pitch = Math::atan2(lv, (look - up * lv).length());
@@ -604,8 +633,11 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 		r_b.pitch = 0.0f;
 	}
 	_update_tier(r_b, pos);
-	const real_t brake_hl = r_b.fly_brake_time < 0.0f ? -1.0f : _halflife(r_b.fly_brake_time);
-	Vector3 v = _free_step(p_body->get_velocity() - r_b.backoff, input, up, r_b.fly_speed, _halflife(r_b.fly_accel_time), brake_hl, p_dt);
+	// Покой закона: снаружи с потоком — поток (сносит без ввода), иначе ноль с торможением профиля
+	const bool flowing = _flowing(r_b);
+	const Vector3 rest = flowing ? spaces[r_b.space].flow : Vector3();
+	const real_t rest_hl = flowing ? spaces[r_b.space].flow_hl : (r_b.fly_brake_time < 0.0f ? -1.0f : _halflife(r_b.fly_brake_time));
+	Vector3 v = _free_step(p_body->get_velocity() - r_b.backoff, input, up, r_b.fly_speed, _halflife(r_b.fly_accel_time), rest, rest_hl, p_dt);
 	const Vector3 push = _fly_backoff(r_b, pos, v) + sep;
 	r_b.backoff = push;
 	v += push;
@@ -621,7 +653,7 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 	r_b.on_step = false;
 	_lag(r_b, 0.0f, p_dt);
 	_turn(r_b, p_body, look, up, p_dt);
-	r_b.want_speed = input.length() * r_b.fly_speed;
-	r_b.state = input.length_squared() > 1e-6f ? EnemyWorld::AGENT_MOVE : EnemyWorld::AGENT_IDLE;
+	r_b.want_speed = intent.length() * r_b.fly_speed;
+	r_b.state = intent.length_squared() > 1e-6f ? EnemyWorld::AGENT_MOVE : EnemyWorld::AGENT_IDLE;
 	_publish(r_b, p_body, p_fx, Vector3(), Vector3(), false, p_now);
 }

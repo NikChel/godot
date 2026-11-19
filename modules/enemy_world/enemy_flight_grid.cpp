@@ -314,22 +314,84 @@ bool EnemyFlightGrid::restore(const Vector3 &p_origin, const Vector3i &p_dims, r
 	return true;
 }
 
+bool EnemyFlightGrid::_blocked(const Vector3i &p_c) const {
+	if (!in(p_c)) {
+		return !open;
+	}
+	if (open && (p_c.x == 0 || p_c.y == 0 || p_c.z == 0 || p_c.x == nx - 1 || p_c.y == ny - 1 || p_c.z == nz - 1)) {
+		return false;
+	}
+	return occ[index(p_c.x, p_c.y, p_c.z)] != 0;
+}
+
 bool EnemyFlightGrid::is_free(const Vector3 &p_local) const {
 	if (build != BUILD_READY) {
 		return false;
 	}
+	return !_blocked(cell_of(p_local));
+}
+
+// Отрезок r_a → r_b обрезан коробкой [p_lo, p_hi] (Лианг — Барски); false — коробку не пересекает.
+static bool clip_box(Vector3 &r_a, Vector3 &r_b, const Vector3 &p_lo, const Vector3 &p_hi) {
+	real_t t0 = 0.0f;
+	real_t t1 = 1.0f;
+	const Vector3 a = r_a;
+	const Vector3 d = r_b - r_a;
+	for (int k = 0; k < 3; k++) {
+		if (Math::abs(d[k]) < 1e-9f) {
+			if (a[k] < p_lo[k] || a[k] > p_hi[k]) {
+				return false;
+			}
+			continue;
+		}
+		real_t ta = (p_lo[k] - a[k]) / d[k];
+		real_t tb = (p_hi[k] - a[k]) / d[k];
+		if (ta > tb) {
+			SWAP(ta, tb);
+		}
+		t0 = MAX(t0, ta);
+		t1 = MIN(t1, tb);
+		if (t0 > t1) {
+			return false;
+		}
+	}
+	r_a = a + d * t0;
+	r_b = a + d * t1;
+	return true;
+}
+
+bool EnemyFlightGrid::interior(const Vector3 &p_local) const {
 	const Vector3i c = cell_of(p_local);
-	return in(c) && occ[index(c.x, c.y, c.z)] == 0;
+	return build == BUILD_READY && c.x >= 1 && c.y >= 1 && c.z >= 1 && c.x <= nx - 2 && c.y <= ny - 2 && c.z <= nz - 2;
+}
+
+Vector3 EnemyFlightGrid::entry_point(const Vector3 &p_a, const Vector3 &p_b) const {
+	if (build != BUILD_READY || interior(p_a)) {
+		return p_a;
+	}
+	constexpr real_t EPS = 1e-3f;
+	Vector3 pa = (p_a - origin) / cell;
+	Vector3 pb = (p_b - origin) / cell;
+	if (!clip_box(pa, pb, Vector3(1.0f + EPS, 1.0f + EPS, 1.0f + EPS), Vector3((real_t)(nx - 1) - EPS, (real_t)(ny - 1) - EPS, (real_t)(nz - 1) - EPS))) {
+		return p_b;
+	}
+	return origin + pa * cell;
 }
 
 // Обход клеток отрезка (Amanatides–Woo): клетки между концами свободны; концы не проверяются (тело у пола — в занятой
-// клетке своей коробки, цель — тоже).
+// клетке своей коробки, цель — тоже). Открытая сетка: отрезок обрезан коробкой сетки (вне неё свободно).
 bool EnemyFlightGrid::line_free(const Vector3 &p_a, const Vector3 &p_b) const {
 	if (build != BUILD_READY) {
 		return false;
 	}
-	const Vector3 pa = (p_a - origin) / cell;
-	const Vector3 pb = (p_b - origin) / cell;
+	Vector3 pa = (p_a - origin) / cell;
+	Vector3 pb = (p_b - origin) / cell;
+	if (open) {
+		constexpr real_t EPS = 1e-3f;
+		if (!clip_box(pa, pb, Vector3(EPS, EPS, EPS), Vector3((real_t)nx - EPS, (real_t)ny - EPS, (real_t)nz - EPS))) {
+			return true; // Отрезок вне коробки сетки
+		}
+	}
 	Vector3i c((int)Math::floor(pa.x), (int)Math::floor(pa.y), (int)Math::floor(pa.z));
 	const Vector3i e((int)Math::floor(pb.x), (int)Math::floor(pb.y), (int)Math::floor(pb.z));
 	if (!in(c) || !in(e)) {
@@ -365,7 +427,7 @@ bool EnemyFlightGrid::line_free(const Vector3 &p_a, const Vector3 &p_b) const {
 		if (c == e) {
 			return true;
 		}
-		if (!in(c) || occ[index(c.x, c.y, c.z)]) {
+		if (_blocked(c)) {
 			return false;
 		}
 	}
@@ -394,4 +456,8 @@ void EnemyFlightGrid::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("component_at", "local"), &EnemyFlightGrid::component_at);
 	ClassDB::bind_method(D_METHOD("get_component_count"), &EnemyFlightGrid::get_component_count);
 	ClassDB::bind_method(D_METHOD("get_component_usec"), &EnemyFlightGrid::get_component_usec);
+	ClassDB::bind_method(D_METHOD("set_open", "open"), &EnemyFlightGrid::set_open);
+	ClassDB::bind_method(D_METHOD("is_open"), &EnemyFlightGrid::is_open);
+	ClassDB::bind_method(D_METHOD("interior", "local"), &EnemyFlightGrid::interior);
+	ClassDB::bind_method(D_METHOD("entry_point", "a", "b"), &EnemyFlightGrid::entry_point);
 }

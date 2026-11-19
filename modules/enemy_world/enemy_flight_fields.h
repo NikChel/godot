@@ -14,11 +14,15 @@
 // Путь тела (steer): прямая видимость по клеткам — к цели; иначе спуск по полю (26 соседей) до DESCENT клеток от лучшей
 // клетки у тела и самая дальняя видимая клетка спуска; не видна ни одна — свободный сосед клетки тела по грани с меньшим
 // полем (ход дальнего яруса — по осям), клетка тела вне поля — первая клетка спуска.
+// Число слотов целей — свойство экземпляра (set_max_targets; по умолчанию MAX_TARGETS): у наружной сетки целей больше
+// (игроки и наружные шлюзы). Открытая сетка (EnemyFlightGrid::set_open): тело вне внутренних клеток, прямая закрыта — к
+// точке входа отрезка во внутренние клетки (там — поле); цель вне коробки засевается у края (клетка посева зажата внутрь).
 class EnemyFlightFields : public RefCounted {
 	GDCLASS(EnemyFlightFields, RefCounted);
 
 public:
-	static constexpr int MAX_TARGETS = 4;
+	static constexpr int MAX_TARGETS = 4; // Слотов по умолчанию
+	static constexpr int TARGETS_LIMIT = 16;
 	static constexpr uint16_t UNREACHED = 0xFFFF;
 	static constexpr int DESCENT = 10; // Клеток спуска по полю (≈5 м при 0.5)
 	static constexpr uint64_t RELEASE_TICKS = 270; // Цель без want столько тиков — слот свободен
@@ -37,8 +41,9 @@ private:
 
 	Ref<EnemyFlightGrid> grid;
 	uint32_t epoch = 0; // Эпоха сетки, для которой поля
-	Target targets[MAX_TARGETS];
-	LocalVector<uint16_t> bufs[MAX_TARGETS + 1]; // Поля целей и рабочий (по клетке; UNREACHED — не дошёл)
+	int max_targets = MAX_TARGETS;
+	LocalVector<Target> targets; // max_targets
+	LocalVector<LocalVector<uint16_t>> bufs; // Поля целей и рабочий, max_targets + 1 (по клетке; UNREACHED — не дошёл)
 	int work_buf = MAX_TARGETS;
 	LocalVector<uint32_t> queue;
 	uint32_t q_head = 0;
@@ -71,7 +76,10 @@ protected:
 	static void _bind_methods();
 
 public:
+	EnemyFlightFields();
 	void set_grid(const Ref<EnemyFlightGrid> &p_grid);
+	void set_max_targets(int p_count); // Слотов целей (1…TARGETS_LIMIT); поля заново
+	int get_max_targets() const { return max_targets; }
 	Ref<EnemyFlightGrid> get_grid() const { return grid; }
 	bool is_ready() const { return grid.is_valid() && grid->is_ready(); }
 	void want(int64_t p_id, const Vector3 &p_local, uint64_t p_now); // Цель нужна в этом тике (центр, локально)

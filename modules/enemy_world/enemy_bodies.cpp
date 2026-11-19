@@ -617,10 +617,12 @@ Vector3 EnemyBodies::body_net_pos(int p_h) const {
 	return bodies[p_h].net_pos;
 }
 
-void EnemyBodies::set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids) {
+void EnemyBodies::set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids, const PackedByteArray &p_sides) {
 	ERR_FAIL_COND(p_alive.size() != p_pos.size() || p_ids.size() != p_pos.size());
+	ERR_FAIL_COND(!p_sides.is_empty() && p_sides.size() != p_pos.size());
 	players_pos = p_pos;
 	players_alive = p_alive;
+	players_side = p_sides;
 	players_id.resize((uint32_t)p_ids.size());
 	for (int i = 0; i < p_ids.size(); i++) {
 		players_id[i] = ObjectID((uint64_t)p_ids[i]);
@@ -703,11 +705,12 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	if (r_b.ragdoll && r_b.move == MOVE_FLY && _follow_ragdoll(p_h, r_b, p_body, fx, p_now)) {
 		return; // Сбит лётом: тело тика — в тазу куклы
 	}
-	if (r_b.move == MOVE_WALK && r_b.flight == FLIGHT_ALWAYS && !r_b.ragdoll) {
+	const bool open = _open(r_b); // Снаружи летит любой профиль и не садится (enemy_bodies_open.cpp)
+	if (r_b.move == MOVE_WALK && (r_b.flight == FLIGHT_ALWAYS || open) && !r_b.ragdoll) {
 		_take_off(p_h, r_b, p_body); // Летает всегда — с первого тика, и без сетки (висит до неё)
 	}
 	if (r_b.move == MOVE_FLY) { // Летит (enemy_bodies_flight.cpp); тяжесть вернулась — садится и идёт (летает всегда — нет)
-		if (r_b.flight == FLIGHT_ALWAYS || (_grid_ok(r_b) && r_b.zero_g)) {
+		if (r_b.flight == FLIGHT_ALWAYS || open || (_grid_ok(r_b) && r_b.zero_g)) {
 			_tick_fly(p_h, r_b, p_body, fx, p_now, p_dt);
 			return;
 		}
@@ -789,7 +792,7 @@ void EnemyBodies::_tick_body(int p_h, Body &r_b, CharacterBody3D *p_body, uint64
 	}
 	r_b.fly_dist = -1.0f;
 	if (r_b.zero_g && r_b.moving && !r_b.point_set && _grid_ok(r_b)) {
-		r_b.fly_dist = flight->field_dist((int64_t)r_b.target, spaces[0].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
+		r_b.fly_dist = _fields(r_b.space)->field_dist((int64_t)r_b.target, spaces[r_b.space].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
 	}
 	if (r_b.move == MOVE_WALK && _wants_fly(r_b, p_body, p_now)) {
 		_take_off(p_h, r_b, p_body);
@@ -1038,20 +1041,33 @@ bool EnemyBodies::_player_alive(int p_i) const {
 	return p_i >= 0 && players_alive[p_i] != 0;
 }
 
-int EnemyBodies::_pick(const Vector3 &p_pos) const {
+// Цель (заголовок): ближайший живой игрок по ту же сторону обшивки (тело снаружи — сторона 1), нет такого — ближайший;
+// сторон в снимке нет — ближайший.
+int EnemyBodies::_pick(const Body &p_b, const Vector3 &p_pos) const {
+	const bool sides = !players_side.is_empty();
+	const uint8_t mine = _open(p_b) ? 1 : 0;
 	int best = -1;
+	int any = -1;
 	real_t best_d = (real_t)Math::INF;
+	real_t any_d = (real_t)Math::INF;
 	for (int i = 0; i < players_pos.size(); i++) {
 		if (!_player_alive(i)) {
 			continue;
 		}
 		const real_t d = players_pos[i].distance_squared_to(p_pos);
+		if (d < any_d) {
+			any_d = d;
+			any = i;
+		}
+		if (sides && players_side[i] != mine) {
+			continue;
+		}
 		if (d < best_d) {
 			best_d = d;
 			best = i;
 		}
 	}
-	return best;
+	return best >= 0 ? best : any;
 }
 
 // Цель ближе REACH (по горизонтали верха тела) и в секторе перед взглядом.
@@ -1098,7 +1114,7 @@ void EnemyBodies::_brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Tran
 	}
 	if (p_now >= r_b.next_pick || !_player_alive(ti)) {
 		r_b.next_pick = p_now + PICK_TICKS;
-		ti = _pick(p_body->get_global_position());
+		ti = _pick(r_b, p_body->get_global_position());
 		r_b.target = ti >= 0 ? players_id[ti] : ObjectID();
 	}
 	if (r_b.fire_max > 0.0f) {
@@ -1237,9 +1253,9 @@ void EnemyBodies::_brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p
 	// EnemyBackoff), отход — внутри порога минимальной (+ FIRE_STOP_IN: проходит её с ходом, к концу медленнее)
 	const real_t blind_stop = FLY_STOP;
 	const real_t back_stop = r_b.fire_min + FIRE_STOP_IN;
-	// Встать к прицелу — только в свободной клетке сетки полёта (пространство корабля): в занятой (след хода кабины лифта
-	// у проёма, геометрия) — дальше к цели, вплотную (кабина не упрётся в висящего стрелка)
-	const bool free_here = !_grid_ok(r_b) || flight->get_grid()->is_free(spaces[0].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
+	// Встать к прицелу — только в свободной клетке сетки полёта пространства тела (корабль, снаружи — вне коробки свободно):
+	// в занятой (след хода кабины лифта у проёма, геометрия) — дальше к цели, вплотную (кабина не упрётся в висящего стрелка)
+	const bool free_here = !_grid_ok(r_b) || _fields(r_b.space)->get_grid()->is_free(spaces[r_b.space].inv.xform(p_body->get_global_position() + r_b.up * CENTER_H));
 	// Прицел: висит, лицом и наклоном к цели; очередь — первый выстрел в конце прицела
 	auto windup = [&]() {
 		r_b.brain = BRAIN_WINDUP;
@@ -1641,6 +1657,10 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_remove", "handle"), &EnemyBodies::body_remove);
 	ClassDB::bind_method(D_METHOD("body_kill", "handle"), &EnemyBodies::body_kill);
 	ClassDB::bind_method(D_METHOD("space_add", "crowd", "frame"), &EnemyBodies::space_add);
+	ClassDB::bind_method(D_METHOD("space_add_open", "root"), &EnemyBodies::space_add_open);
+	ClassDB::bind_method(D_METHOD("space_set_flight", "space", "fields"), &EnemyBodies::space_set_flight);
+	ClassDB::bind_method(D_METHOD("space_set_flow", "space", "velocity", "halflife"), &EnemyBodies::space_set_flow);
+	ClassDB::bind_method(D_METHOD("space_is_open", "space"), &EnemyBodies::space_is_open);
 	ClassDB::bind_method(D_METHOD("space_set_ready", "space", "ready"), &EnemyBodies::space_set_ready);
 	ClassDB::bind_method(D_METHOD("get_space_count"), &EnemyBodies::get_space_count);
 	ClassDB::bind_method(D_METHOD("set_floor_spaces", "ids", "spaces"), &EnemyBodies::set_floor_spaces);
@@ -1701,7 +1721,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_tumble_state", "handle"), &EnemyBodies::body_tumble_state);
 	ClassDB::bind_method(D_METHOD("body_set_ragdoll", "handle", "on", "pelvis"), &EnemyBodies::body_set_ragdoll, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("body_set_knockdown", "handle", "pivot_height", "knock_time"), &EnemyBodies::body_set_knockdown);
-	ClassDB::bind_method(D_METHOD("set_players", "positions", "alive", "ids"), &EnemyBodies::set_players);
+	ClassDB::bind_method(D_METHOD("set_players", "positions", "alive", "ids", "sides"), &EnemyBodies::set_players, DEFVAL(PackedByteArray()));
 	ClassDB::bind_method(D_METHOD("set_nav_ready", "ready"), &EnemyBodies::set_nav_ready);
 	ClassDB::bind_method(D_METHOD("set_tier_override", "tier"), &EnemyBodies::set_tier_override);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &EnemyBodies::tick);

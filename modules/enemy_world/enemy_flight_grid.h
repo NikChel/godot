@@ -17,6 +17,10 @@
 // соседям, один обход в ширину по готовности; номера с 1, больше 65535 частей — последний общий); часть точки
 // (component_at) — её клетки или ближайшей свободной в кубе радиуса 1, затем 2. Маршрут летящего (GDScript NavPortals)
 // различает по ним части корабля, связанные только подвижными системами (палубы лифта).
+// Открытая сетка (set_open; наружная сетка пространства снаружи, план 2026-11-19-enemies-outside): вне коробки сетки и
+// кайма — свободны для is_free, line_free и хода дальнего яруса (прямая обрезается коробкой сетки); в занятости кайма
+// остаётся занятой — поля расстояний считаются по внутренним клеткам. interior — точка во внутренних клетках,
+// entry_point — точка входа отрезка в них.
 class EnemyFlightGrid : public RefCounted {
 	GDCLASS(EnemyFlightGrid, RefCounted);
 
@@ -26,6 +30,7 @@ class EnemyFlightGrid : public RefCounted {
 		BUILD_READY,
 	};
 
+	bool open = false;
 	uint8_t build = BUILD_NONE;
 	uint32_t epoch = 0; // Сетка сменилась (build_begin / restore) — поля заново
 	Vector3 origin; // Угол сетки (локально)
@@ -49,6 +54,7 @@ class EnemyFlightGrid : public RefCounted {
 	void _voxelize(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c);
 	static bool _tri_box(const Vector3 &p_center, const Vector3 &p_half, const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c);
 	void _finish_build();
+	bool _blocked(const Vector3i &p_c) const; // Клетка для прохода занята (открытая: вне коробки и кайма — свободны)
 
 protected:
 	static void _bind_methods();
@@ -72,6 +78,11 @@ public:
 	int64_t get_memory_bytes() const { return (int64_t)occ.size() + (int64_t)part.size() * 2; }
 	int64_t get_build_usec() const { return (int64_t)build_usec; }
 	int get_build_steps() const { return build_steps; }
+	// Открытая сетка (шапка)
+	void set_open(bool p_open) { open = p_open; }
+	bool is_open() const { return open; }
+	bool interior(const Vector3 &p_local) const; // Точка во внутренних клетках (не кайма, не вне коробки)
+	Vector3 entry_point(const Vector3 &p_a, const Vector3 &p_b) const; // Вход отрезка во внутренние клетки; a внутри — a, не входит — b
 	// Клетки
 	bool contains(const Vector3 &p_local) const { return build == BUILD_READY && in(cell_of(p_local)); }
 	bool is_free(const Vector3 &p_local) const;

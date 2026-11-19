@@ -8,17 +8,31 @@
 
 static constexpr uint32_t QUEUE_COMPACT = 1u << 20; // Очередь обхода сжимается, когда пройдено больше
 
+EnemyFlightFields::EnemyFlightFields() {
+	targets.resize((uint32_t)max_targets);
+	bufs.resize((uint32_t)max_targets + 1);
+	_reset();
+}
+
 void EnemyFlightFields::set_grid(const Ref<EnemyFlightGrid> &p_grid) {
 	grid = p_grid;
 	_reset();
 }
 
+void EnemyFlightFields::set_max_targets(int p_count) {
+	max_targets = CLAMP(p_count, 1, TARGETS_LIMIT);
+	targets.resize((uint32_t)max_targets);
+	bufs.resize((uint32_t)max_targets + 1);
+	rr = 0;
+	_reset();
+}
+
 void EnemyFlightFields::_reset() {
-	for (int i = 0; i < MAX_TARGETS; i++) {
+	for (int i = 0; i < max_targets; i++) {
 		targets[i] = Target();
 		targets[i].buf = i;
 	}
-	work_buf = MAX_TARGETS;
+	work_buf = max_targets;
 	work_slot = -1;
 	queue.clear();
 	q_head = 0;
@@ -37,7 +51,7 @@ bool EnemyFlightFields::_sync() {
 }
 
 int EnemyFlightFields::_slot(int64_t p_id) const {
-	for (int i = 0; i < MAX_TARGETS; i++) {
+	for (int i = 0; i < max_targets; i++) {
 		if (targets[i].used && targets[i].id == p_id) {
 			return i;
 		}
@@ -52,7 +66,7 @@ void EnemyFlightFields::want(int64_t p_id, const Vector3 &p_local, uint64_t p_no
 	now = MAX(now, p_now);
 	int s = _slot(p_id);
 	if (s < 0) {
-		for (int i = 0; i < MAX_TARGETS; i++) {
+		for (int i = 0; i < max_targets; i++) {
 			if (!targets[i].used || now > targets[i].wanted + RELEASE_TICKS) {
 				s = i;
 				break;
@@ -81,8 +95,8 @@ uint32_t EnemyFlightFields::_seed_cell(const Vector3 &p_local) const {
 
 // Следующая цель по кругу, чьё поле нужно: нет готового или цель сошла с клетки посева.
 bool EnemyFlightFields::_start_field() {
-	for (int k = 0; k < MAX_TARGETS; k++) {
-		const int s = (rr + k) % MAX_TARGETS;
+	for (int k = 0; k < max_targets; k++) {
+		const int s = (rr + k) % max_targets;
 		const Target &t = targets[s];
 		if (!t.used || now > t.wanted + RELEASE_TICKS) {
 			continue;
@@ -241,7 +255,7 @@ const uint16_t *EnemyFlightFields::_field(int64_t p_id) const {
 
 int EnemyFlightFields::get_target_count() const {
 	int n = 0;
-	for (int i = 0; i < MAX_TARGETS; i++) {
+	for (int i = 0; i < max_targets; i++) {
 		n += (targets[i].used && now <= targets[i].wanted + RELEASE_TICKS) ? 1 : 0;
 	}
 	return n;
@@ -249,7 +263,7 @@ int EnemyFlightFields::get_target_count() const {
 
 int64_t EnemyFlightFields::get_memory_bytes() const {
 	int64_t m = (int64_t)queue.size() * 4;
-	for (int i = 0; i <= MAX_TARGETS; i++) {
+	for (int i = 0; i <= max_targets; i++) {
 		m += (int64_t)bufs[i].size() * 2;
 	}
 	return m;
@@ -305,6 +319,10 @@ bool EnemyFlightFields::steer(int64_t p_id, const Vector3 &p_from, const Vector3
 		return false;
 	}
 	if (grid->line_free(p_from, p_goal)) {
+		return true;
+	}
+	if (grid->is_open() && !grid->interior(p_from)) {
+		r_aim = grid->entry_point(p_from, p_goal); // Открытая сетка, тело вне внутренних клеток: к входу отрезка в них
 		return true;
 	}
 	const uint16_t *f = _field(p_id);
@@ -400,5 +418,7 @@ void EnemyFlightFields::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_last_field_cells"), &EnemyFlightFields::get_last_field_cells);
 	ClassDB::bind_method(D_METHOD("get_fields_done"), &EnemyFlightFields::get_fields_done);
 	ClassDB::bind_method(D_METHOD("get_target_count"), &EnemyFlightFields::get_target_count);
+	ClassDB::bind_method(D_METHOD("set_max_targets", "count"), &EnemyFlightFields::set_max_targets);
+	ClassDB::bind_method(D_METHOD("get_max_targets"), &EnemyFlightFields::get_max_targets);
 	BIND_CONSTANT(MAX_TARGETS);
 }

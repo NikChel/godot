@@ -116,6 +116,16 @@ class Node3D;
 // точки не нужно (летит прямо): поле точки — только пока её не видно. Поле цели готово, а от тела по нему до неё не
 // достать (цель в другой части сетки: на палубе за лифтом, в кабине) — висит, по прямой к ней не летит (маршрут —
 // порталом; поля ещё нет — по прямой, как было). Отход — не в занятые клетки сетки (за спиной — след кабины).
+// Пространство снаружи (план 2026-11-19-enemies-outside, шаг 1; enemy_bodies_open.cpp): space_add_open — пространство в
+// осях корня карты без толпы и сетки навигации, со своей сеткой полёта (space_set_flight: открытая сетка — вне коробки
+// свободно) и потоком (space_set_flow: скорость и полураспад, выключен — полураспад < 0). Тело в нём всегда летит (любой
+// профиль, без посадки), без рабочей высоты; закон полёта — с покоем = поток (как PlayerFreeMove игрока). Мозг ведёт тело
+// — ввод даёт путевую скорость по ходу (к носу медленнее, к корме быстрее; к точке остановки не быстрее зазор /
+// ARRIVE_S); не ведёт (прицел, очередь, перезарядка, висит) — держится на месте против потока; оглушённого — сносит.
+// Сетки полёта — у каждого пространства свои (0 — set_flight); цели полей и пересчёт — по пространствам тел, бюджет
+// пересчёта делится. Меняют пространство снаружи переход (body_teleport) и появление (body_set_space).
+// Цель мозга (решение пользователя 2026-11-19): ближайший живой игрок по ту же сторону обшивки (set_players: сторона —
+// 1 снаружи; тело снаружи — в пространстве снаружи), иначе ближайший; сторон нет — ближайший.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -245,6 +255,10 @@ private:
 		bool ready = false; // Сетка собрана (NavSpace.is_ready)
 		Transform3D xf; // Поза этого тика (координаты толпы)
 		Transform3D inv;
+		bool open = false; // Снаружи (space_add_open): тела летят, поток
+		Ref<EnemyFlightFields> fields; // Поля сетки полёта пространства (0 — flight)
+		Vector3 flow; // Поток (мир), м/с
+		real_t flow_hl = -1.0f; // Полураспад к потоку, с; < 0 — потока нет (невесомость)
 	};
 
 	struct Body {
@@ -390,6 +404,7 @@ private:
 	RID query_sphere;
 	PackedVector3Array players_pos;
 	PackedByteArray players_alive;
+	PackedByteArray players_side; // 1 — снаружи; пусто — сторон нет
 	LocalVector<ObjectID> players_id;
 	PackedInt32Array events;
 	PackedVector4Array wake_points; // Точки интереса тика (сон хит-форм): центр (мир) и радиус
@@ -414,6 +429,7 @@ private:
 	LocalVector<int> fly_s; // … пространства …
 	LocalVector<uint8_t> fly_go; // … и идут ли они (мозг ведёт к цели или точке, прошлый тик)
 	uint64_t last_flight_usec = 0;
+	uint32_t flight_rr = 0; // Пересчёт полей: первое пространство с полями по кругу
 
 	bool _valid(int p_h) const;
 	void _space_xforms();
@@ -447,7 +463,7 @@ private:
 	// Мозг
 	int _player_index(ObjectID p_id) const;
 	bool _player_alive(int p_i) const;
-	int _pick(const Vector3 &p_pos) const;
+	int _pick(const Body &p_b, const Vector3 &p_pos) const;
 	bool _in_reach(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
 	void _brain(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
 	void _brain_fire(int p_h, Body &r_b, CharacterBody3D *p_body, int p_ti, uint64_t p_now);
@@ -487,10 +503,15 @@ private:
 	void _fly_far(Body &r_b, CharacterBody3D *p_body, const Vector3 &p_v, bool p_free_up, real_t p_dt);
 	Vector3 _grid_clip(const Body &p_b, const Vector3 &p_center, const Vector3 &p_dir, const Vector3 &p_vel) const;
 	bool _in_reach_fly(const Body &p_b, CharacterBody3D *p_body, const Transform3D &p_fx, const Vector3 &p_target) const;
-	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, real_t p_brake_hl, real_t p_dt);
+	static Vector3 _free_step(const Vector3 &p_v, const Vector3 &p_in, const Vector3 &p_up, real_t p_speed, real_t p_accel_hl, const Vector3 &p_rest, real_t p_rest_hl, real_t p_dt);
 	real_t _hover_lift(Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now);
 	static real_t _halflife(real_t p_time);
 	static Vector3 _aim(const Body &p_b, const Transform3D &p_fx);
+	// Пространство снаружи и поля пространств (enemy_bodies_open.cpp)
+	EnemyFlightFields *_fields(int p_space) const;
+	bool _open(const Body &p_b) const;
+	bool _flowing(const Body &p_b) const;
+	Vector3 _flow_input(const Body &p_b, const Vector3 &p_in, real_t p_cap) const;
 
 protected:
 	static void _bind_methods();
@@ -504,6 +525,12 @@ public:
 	void body_remove(int p_h);
 	void body_kill(int p_h); // Смерть: толпа отпускает агента, вид выключен, тик пропускает тело
 	int space_add(const Ref<EnemyWorld> &p_crowd, Node3D *p_frame); // Подвижное пространство (ReferenceFrame); индекс
+	// Пространство снаружи (шапка): оси корня карты p_root; индекс. Поля его сетки полёта; поток (мир, м/с) и полураспад к
+	// нему (с; < 0 — потока нет); снаружи ли пространство
+	int space_add_open(Node3D *p_root);
+	void space_set_flight(int p_space, const Ref<EnemyFlightFields> &p_fields);
+	void space_set_flow(int p_space, const Vector3 &p_velocity, real_t p_halflife);
+	bool space_is_open(int p_space) const;
 	void space_set_ready(int p_space, bool p_ready);
 	int get_space_count() const { return (int)spaces.size(); }
 	void set_floor_spaces(const PackedInt64Array &p_ids, const PackedInt32Array &p_spaces); // Тело пола (instance id) → пространство
@@ -612,8 +639,8 @@ public:
 	// пусто — пути нет)
 	PackedVector3Array body_fly_path(int p_h) const;
 
-	// Снимок игроков этого тика: позы (мир), живы ли, instance id
-	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids);
+	// Снимок игроков этого тика: позы (мир), живы ли, instance id, сторона обшивки (1 — снаружи; пусто — сторон нет)
+	void set_players(const PackedVector3Array &p_pos, const PackedByteArray &p_alive, const PackedInt64Array &p_ids, const PackedByteArray &p_sides = PackedByteArray());
 	void set_nav_ready(bool p_ready); // Сетка корабля (пространство 0)
 	void set_tier_override(int p_tier); // -1 — по расстоянию (пробы: TIER_NEAR / TIER_FAR)
 	PackedInt32Array tick(real_t p_delta); // События: пары (Event, ручка)
