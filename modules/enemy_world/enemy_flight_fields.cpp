@@ -350,6 +350,29 @@ bool EnemyFlightFields::steer(int64_t p_id, const Vector3 &p_from, const Vector3
 			return true;
 		}
 	}
+	// Ни одна клетка спуска не видна (клетка старта и спуск — через ребро или угол преграды): шаг по грани — свободный
+	// сосед клетки тела с меньшим полем. Ход дальнего яруса — по осям и в занятую клетку не входит: курс на клетку за
+	// преградой его останавливает. Клетка тела вне поля (занята, другая часть сетки) — первая клетка спуска.
+	const Vector3i b = grid->cell_of(p_from);
+	if (grid->in(b)) {
+		const uint32_t bi = grid->index(b.x, b.y, b.z);
+		uint16_t bv = f[bi];
+		if (bv != UNREACHED) { // Клетка с полем свободна — не у края сетки: соседи в ней
+			uint32_t best = bi;
+			const uint32_t nb[6] = { bi + 1, bi - 1, (uint32_t)((int64_t)bi + sy), (uint32_t)((int64_t)bi - sy),
+				(uint32_t)((int64_t)bi + sz), (uint32_t)((int64_t)bi - sz) };
+			for (int k = 0; k < 6; k++) {
+				if (f[nb[k]] < bv) {
+					bv = f[nb[k]];
+					best = nb[k];
+				}
+			}
+			if (best != bi) {
+				r_aim = grid->center(best);
+				return true;
+			}
+		}
+	}
 	r_aim = grid->center(chain[0]);
 	return true;
 }
