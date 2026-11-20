@@ -23,7 +23,8 @@
 // призрак остаётся, пока перекрыт с соседом (ближе суммы радиусов), перекрытые с призраком расходятся (как разведение, не
 // медленнее GHOST_APART_MIN, и без цели).
 // Числа агента — agent_set_backoff; скорость уступки — отдельно от желаемой (agent_backoff): тело кладёт её без
-// разгона, иначе зазор качается «стоп-пошёл». Правило — EnemyBackoff (то же у копий клиента, EnemyReplicas).
+// разгона, иначе зазор качается «стоп-пошёл». Правило — EnemyBackoff (то же у копий клиента, EnemyReplicas). Точка со
+// скоростью (части кабины турели) в касании добавляет к уступке перенос вдоль нормали (EnemyBackoff::carry_along).
 class EnemyWorld : public RefCounted {
 	GDCLASS(EnemyWorld, RefCounted);
 
@@ -152,6 +153,7 @@ private:
 	LocalVector<int> prev_link;
 	LocalVector<uint8_t> prev_ghost;
 	PackedVector4Array prio_points; // Точки приоритета: xyz — ноги (локальные), w — радиус касания точки
+	PackedVector3Array prio_vels; // Их скорости (локальные; пусто — стоят): перенос EnemyBackoff
 	LocalVector<uint32_t> free_handles;
 	int64_t next_prio = 0;
 	uint64_t stepped_tick = UINT64_MAX;
@@ -230,8 +232,12 @@ public:
 	int count_near(const Vector3 &p_local, real_t p_r, int p_exclude);
 	// Приоритет игроков: точки (xyz — ноги, локальные; w — радиус касания точки) — для ближайшего расчёта и дальше, пока
 	// не заменят (EnemyBodies ставит их в начале своего тика, до первого запроса); числа уступки агента; скорость уступки
-	// (локальная, XZ; не входит в agent_velocity); призрак (уступает или перекрыт с соседом после уступки)
-	void set_priority_points(const PackedVector4Array &p_points) { prio_points = p_points; }
+	// (локальная, XZ; не входит в agent_velocity); призрак (уступает или перекрыт с соседом после уступки). Скорости точек
+	// (локальные; пусто или не того размера — точки стоят) — перенос идущей на агента точкой (EnemyBackoff::carry_along)
+	void set_priority_points(const PackedVector4Array &p_points, const PackedVector3Array &p_vels = PackedVector3Array()) {
+		prio_points = p_points;
+		prio_vels = p_vels;
+	}
 	void agent_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed);
 	Vector3 agent_backoff(int p_h);
 	bool agent_ghost(int p_h);

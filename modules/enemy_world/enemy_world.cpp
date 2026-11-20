@@ -774,9 +774,10 @@ Vector3 EnemyWorld::_onto_mesh(Follow &r_f, const Vector3 &p_pos, const Vector3 
 // --- Приоритет игроков ---
 
 // Скорость уступки: каждая точка ближе касания + зазора (по высоте ±BACKOFF_H) — от неё min(gain · глубина, speed);
-// сумма — не длиннее speed. r_pressed — точка глубже PRESS_EPS (и на её оси: направления нет — скорости нет).
+// сумма — не длиннее speed; идущая на агента точка — плюс перенос (EnemyBackoff::carry_along). r_pressed — точка глубже
+// PRESS_EPS (и на её оси: направления нет — скорости нет).
 Vector3 EnemyWorld::_backoff(uint32_t p_h, const Vector3 &p_pos, bool &r_pressed) const {
-	return backoff_cfg[p_h].velocity(p_pos, prio_points, r_pressed);
+	return backoff_cfg[p_h].velocity(p_pos, prio_points, r_pressed, prio_vels);
 }
 
 // Свой ход агента к точкам, которые его теснят (ближе касания + зазора), снят: игрок главнее.
@@ -856,7 +857,7 @@ void EnemyWorld::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("agent_stuck_total", "handle"), &EnemyWorld::agent_stuck_total);
 	ClassDB::bind_method(D_METHOD("agent_blocked_total", "handle"), &EnemyWorld::agent_blocked_total);
 	ClassDB::bind_method(D_METHOD("agent_yield_total", "handle"), &EnemyWorld::agent_yield_total);
-	ClassDB::bind_method(D_METHOD("set_priority_points", "points"), &EnemyWorld::set_priority_points);
+	ClassDB::bind_method(D_METHOD("set_priority_points", "points", "velocities"), &EnemyWorld::set_priority_points, DEFVAL(PackedVector3Array()));
 	ClassDB::bind_method(D_METHOD("agent_set_backoff", "handle", "radius", "gap", "gain", "speed"), &EnemyWorld::agent_set_backoff);
 	ClassDB::bind_method(D_METHOD("agent_backoff", "handle"), &EnemyWorld::agent_backoff);
 	ClassDB::bind_method(D_METHOD("agent_ghost", "handle"), &EnemyWorld::agent_ghost);

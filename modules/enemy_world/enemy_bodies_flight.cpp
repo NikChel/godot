@@ -300,12 +300,20 @@ real_t EnemyBodies::_halflife(real_t p_time) {
 }
 
 // Уступка игрокам лётом (правило EnemyBackoff по капсулам вдоль верха тела: отрезки CAPSULE_LO…CAPSULE_HI над ногами
-// тела и точки): ближе касания + зазора — ход к точке снят из r_v, скорость уступки — от точки, не длиннее bo_speed.
+// тела и точки): ближе касания + зазора — ход к точке снят из r_v, скорость уступки — от точки, не длиннее bo_speed;
+// идущая на тело точка — плюс перенос вдоль нормали (EnemyBackoff::carry_along). Точка своего пространства (тело едет в
+// кабине-владельце) — мимо.
 Vector3 EnemyBodies::_fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const {
 	Vector3 push;
+	Vector3 carry;
+	const bool moving = !prio_vels.is_empty();
+	const bool owned = !prio_spaces.is_empty();
 	const Vector3 up = p_b.up;
 	const real_t span = CAPSULE_HI - CAPSULE_LO;
 	for (int i = 0; i < prio_points.size(); i++) {
+		if (owned && prio_spaces[i] == p_b.space) {
+			continue;
+		}
 		const Vector4 &p = prio_points[i];
 		const Vector3 d = p_pos - Vector3(p.x, p.y, p.z);
 		const real_t dv = d.dot(up);
@@ -330,8 +338,15 @@ Vector3 EnemyBodies::_fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3
 			r_v += n * toward;
 		}
 		push += n * MIN(p_b.bo_gain * (r - l), p_b.bo_speed);
+		if (moving) {
+			EnemyBackoff::carry_along(carry, n, prio_vels[i]);
+		}
 	}
-	return push.limit_length(p_b.bo_speed);
+	push = push.limit_length(p_b.bo_speed);
+	if (moving) {
+		push += carry;
+	}
+	return push;
 }
 
 // Дальний ярус лётом: без физики — центр тела по свободным клеткам (шаг в занятую клетку снят по оси; из занятой — в

@@ -909,6 +909,20 @@ Vector3 EnemyBodies::_forward(const Body &p_b, const Transform3D &p_fx) {
 
 // --- Приоритет игроков ---
 
+void EnemyBodies::set_priority_points(const PackedVector4Array &p_points, const PackedVector3Array &p_vels, const PackedInt32Array &p_spaces) {
+	prio_points = p_points;
+	prio_vels.clear();
+	prio_spaces.clear();
+	if (!p_vels.is_empty()) {
+		ERR_FAIL_COND_MSG(p_vels.size() != p_points.size(), "EnemyBodies.set_priority_points: velocities must match points (ignored).");
+		prio_vels = p_vels;
+	}
+	if (!p_spaces.is_empty()) {
+		ERR_FAIL_COND_MSG(p_spaces.size() != p_points.size(), "EnemyBodies.set_priority_points: spaces must match points (ignored).");
+		prio_spaces = p_spaces;
+	}
+}
+
 void EnemyBodies::body_set_backoff(int p_h, real_t p_radius, real_t p_gap, real_t p_gain, real_t p_speed) {
 	ERR_FAIL_COND(!_valid(p_h));
 	Body &b = bodies[p_h];
@@ -929,21 +943,48 @@ bool EnemyBodies::body_ghost(int p_h) const {
 	return bodies[p_h].ghost;
 }
 
-// Точки тика — толпам всех пространств в их системе (касание — по позам: точка в чужом пространстве теснит так же).
+// Точки тика — толпам всех пространств в их системе (касание — по позам: точка в чужом пространстве теснит так же),
+// кроме точек самого пространства (владелец — его номер: в кабине своя кабина не теснит); скорости — в осях системы.
 void EnemyBodies::_priority_to_spaces() {
 	const int n = prio_points.size();
-	prio_local.resize(n);
-	for (Space &s : spaces) {
+	const bool moving = !prio_vels.is_empty();
+	const bool owned = !prio_spaces.is_empty();
+	for (uint32_t si = 0; si < spaces.size(); si++) {
+		Space &s = spaces[si];
 		if (!s.crowd.is_valid()) {
 			continue;
 		}
+		prio_local.resize(n);
 		Vector4 *w = prio_local.ptrw();
+		Vector3 *wv = nullptr;
+		if (moving) {
+			prio_local_v.resize(n);
+			wv = prio_local_v.ptrw();
+		}
+		int k = 0;
 		for (int i = 0; i < n; i++) {
+			if (owned && prio_spaces[i] == (int)si) {
+				continue;
+			}
 			const Vector4 &p = prio_points[i];
 			const Vector3 q = s.inv.xform(Vector3(p.x, p.y, p.z));
-			w[i] = Vector4(q.x, q.y, q.z, p.w);
+			w[k] = Vector4(q.x, q.y, q.z, p.w);
+			if (moving) {
+				wv[k] = s.inv.basis.xform(prio_vels[i]);
+			}
+			k++;
 		}
-		s.crowd->set_priority_points(prio_local);
+		if (k < n) {
+			prio_local.resize(k);
+			if (moving) {
+				prio_local_v.resize(k);
+			}
+		}
+		if (moving) {
+			s.crowd->set_priority_points(prio_local, prio_local_v);
+		} else {
+			s.crowd->set_priority_points(prio_local);
+		}
 	}
 }
 
@@ -1712,7 +1753,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_arm_tilt", "handle", "side"), &EnemyBodies::body_arm_tilt);
 	ClassDB::bind_method(D_METHOD("set_wake_points", "points"), &EnemyBodies::set_wake_points);
 	ClassDB::bind_method(D_METHOD("body_wake_state", "handle"), &EnemyBodies::body_wake_state);
-	ClassDB::bind_method(D_METHOD("set_priority_points", "points"), &EnemyBodies::set_priority_points);
+	ClassDB::bind_method(D_METHOD("set_priority_points", "points", "velocities", "spaces"), &EnemyBodies::set_priority_points, DEFVAL(PackedVector3Array()), DEFVAL(PackedInt32Array()));
 	ClassDB::bind_method(D_METHOD("body_set_backoff", "handle", "radius", "gap", "gain", "speed"), &EnemyBodies::body_set_backoff);
 	ClassDB::bind_method(D_METHOD("body_backoff", "handle"), &EnemyBodies::body_backoff);
 	ClassDB::bind_method(D_METHOD("body_ghost", "handle"), &EnemyBodies::body_ghost);
