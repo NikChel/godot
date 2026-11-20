@@ -301,8 +301,8 @@ real_t EnemyBodies::_halflife(real_t p_time) {
 
 // Уступка игрокам лётом (правило EnemyBackoff по капсулам вдоль верха тела: отрезки CAPSULE_LO…CAPSULE_HI над ногами
 // тела и точки): ближе касания + зазора — ход к точке снят из r_v, скорость уступки — от точки, не длиннее bo_speed;
-// идущая на тело точка — плюс перенос вдоль нормали (EnemyBackoff::carry_along). Точка своего пространства (тело едет в
-// кабине-владельце) — мимо.
+// идущая на тело точка в касании (глубина не больше зазора; глубже — точка тело обогнала) — плюс перенос вдоль нормали
+// (EnemyBackoff::carry_along). Точка своего пространства (тело едет в кабине-владельце) — мимо.
 Vector3 EnemyBodies::_fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const {
 	Vector3 push;
 	Vector3 carry;
@@ -338,7 +338,7 @@ Vector3 EnemyBodies::_fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3
 			r_v += n * toward;
 		}
 		push += n * MIN(p_b.bo_gain * (r - l), p_b.bo_speed);
-		if (moving) {
+		if (moving && r - l <= p_b.bo_gap) {
 			EnemyBackoff::carry_along(carry, n, prio_vels[i]);
 		}
 	}
