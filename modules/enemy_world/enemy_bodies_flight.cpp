@@ -582,6 +582,10 @@ void EnemyBodies::_tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const T
 			aim = reach ? sp.xf.xform(aim_l) : center;
 			r_b.fly_dist = reach ? dist : -1.0f;
 			last = !reach || aim.distance_squared_to(goal) <= 1e-4f;
+			// Снаружи — мимо частей подвижных систем (точки приоритета с владельцем; enemy_bodies_detour.cpp)
+			if (reach && _open(r_b) && _detour(r_b, center, aim)) {
+				last = false;
+			}
 		} else {
 			r_b.fly_dist = -1.0f;
 			aim = _fly_corner(r_b, center, goal, last);

@@ -1785,6 +1785,7 @@ void EnemyBodies::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_aim", "handle"), &EnemyBodies::body_aim);
 	ClassDB::bind_method(D_METHOD("body_pitch", "handle"), &EnemyBodies::body_pitch);
 	ClassDB::bind_method(D_METHOD("body_fly_dist", "handle"), &EnemyBodies::body_fly_dist);
+	ClassDB::bind_method(D_METHOD("body_detour", "handle"), &EnemyBodies::body_detour);
 	ClassDB::bind_method(D_METHOD("body_flight_stats", "handle"), &EnemyBodies::body_flight_stats);
 	ClassDB::bind_method(D_METHOD("get_fly_count"), &EnemyBodies::get_fly_count);
 	ClassDB::bind_method(D_METHOD("get_last_flight_usec"), &EnemyBodies::get_last_flight_usec);

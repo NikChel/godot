@@ -131,6 +131,15 @@ class Node3D;
 // пересчёта делится. Меняют пространство снаружи переход (body_teleport) и появление (body_set_space).
 // Цель мозга (решение пользователя 2026-11-19): ближайший живой игрок по ту же сторону обшивки (set_players: сторона —
 // 1 снаружи; тело снаружи — в пространстве снаружи), иначе ближайший; сторон нет — ближайший.
+// Облёт подвижных преград снаружи (план 2026-11-20-cabin-character, срез 4; enemy_bodies_detour.cpp): преграды курса —
+// только точки приоритета с пространством-владельцем (части подвижных систем: корпус и пушки кабины турели), сфера —
+// центр точки на CENTER_H выше, радиус — её w + касание тела (bo_radius + bo_gap) + DETOUR_MARGIN; тело в пространстве-
+// владельце её не видит. Летящий в открытом пространстве, идущий к цели: цель внутри сферы — на её поверхность; прямая
+// к цели свободна — курс прежний; иначе — направление с наименьшим отклонением от цели, не задевающее ни одной сферы:
+// DETOUR_PLANES полуплоскостей вокруг оси «тело → цель» (первая — к верху тела), в каждой — наименьший угол вне конусов
+// сфер (в сфере, где тело уже стоит, — не глубже DETOUR_TOL), липко: прошлая полуплоскость, пока её угол не хуже лучшего
+// больше чем на DETOUR_KEEP; свободного нет — курс прежний. Оба яруса (ввод мозга), уступка — как была. Без точек с
+// владельцем (ноги игроков, карты без подвижных систем) — прежний курс бит в бит.
 class EnemyBodies : public RefCounted {
 	GDCLASS(EnemyBodies, RefCounted);
 
@@ -225,6 +234,14 @@ public:
 	static constexpr real_t ARRIVE_S = 0.3f; // Подлёт: ввод слабеет, когда до остановки меньше скорости × столько
 	static constexpr real_t CAPSULE_LO = 0.3f; // Капсула уступки лётом по верху тела (ноги + …), м
 	static constexpr real_t CAPSULE_HI = 1.5f;
+	// Облёт частей подвижных систем снаружи (enemy_bodies_detour.cpp): запас сферы преграды сверх касания, допуск хода
+	// вглубь сферы, в которой тело уже стоит, полуплоскостей перебора, липкость прошлой, дальше — преграда не видна
+	static constexpr real_t DETOUR_MARGIN = 0.5f;
+	static constexpr real_t DETOUR_TOL = 0.5f;
+	static constexpr int DETOUR_PLANES = 8;
+	static constexpr real_t DETOUR_KEEP = 0.17f; // рад (~10°)
+	static constexpr real_t DETOUR_LOOK = 60.0f;
+	static constexpr int DETOUR_MAX = 128; // Сфер преград на тело за тик, не больше
 	static constexpr real_t LAND_MAX_S = 3.0f; // После возврата тяжести ближний ярус до пола, не дольше
 	static constexpr real_t FLY_HOLD_R = 1.0f; // Летящий впереди к цели ближе (центры) — ждёт за ним
 	static constexpr real_t FLY_SEP_R = 0.9f; // Летящие ближе (центры) — расходятся
@@ -380,6 +397,7 @@ private:
 		real_t path_gap = 0.0f;
 		real_t fly_dist = -1.0f; // Путь лётом до цели по полю прошлого тика, м (< 0 — нет поля)
 		real_t pitch = 0.0f; // Наклон взгляда к центру цели (удар), рад; идёт — 0
+		int8_t detour = -1; // Полуплоскость облёта подвижной преграды прошлого тика (0 — к верху тела); −1 — прямо
 		uint64_t fall_end = 0; // Тяжесть вернулась: ближний ярус до пола, не дольше этого тика
 		bool landing = false;
 		int take_offs = 0; // Взлётов / посадок всего (пробы)
@@ -503,6 +521,7 @@ private:
 	void _land(Body &r_b, CharacterBody3D *p_body, uint64_t p_now);
 	void _tick_fly(int p_h, Body &r_b, CharacterBody3D *p_body, const Transform3D &p_fx, uint64_t p_now, real_t p_dt);
 	Vector3 _fly_backoff(const Body &p_b, const Vector3 &p_pos, Vector3 &r_v) const;
+	bool _detour(Body &r_b, const Vector3 &p_center, Vector3 &r_aim) const; // enemy_bodies_detour.cpp
 	Vector3 _fly_crowd(int p_h, int p_space, const Vector3 &p_center, const Vector3 &p_goal, bool p_behind_still, bool &r_hold) const;
 	bool _fly_nav(const Body &p_b) const;
 	void _fly_request(int p_h, Body &r_b, CharacterBody3D *p_body, bool p_nav, uint64_t p_now);
@@ -630,6 +649,7 @@ public:
 	Vector3 body_aim(int p_h) const;
 	real_t body_pitch(int p_h) const;
 	real_t body_fly_dist(int p_h) const;
+	int body_detour(int p_h) const; // Облёт подвижной преграды прошлого тика: полуплоскость (0 — к верху тела), −1 — прямо
 	Vector3i body_flight_stats(int p_h) const; // x — взлётов, y — посадок, z — без тяжести сейчас (1 / 0)
 	int get_fly_count() const { return fly_count; }
 	int64_t get_last_flight_usec() const { return (int64_t)last_flight_usec; }
