@@ -48,8 +48,8 @@ bool EnemyBodies::_detour(Body &r_b, const Vector3 &p_center, Vector3 &r_aim) co
 		const Vector4 &p = prio_points[i];
 		const Vector3 c = Vector3(p.x, p.y, p.z) + up * CENTER_H;
 		const real_t r = p.w + touch;
-		if (c.distance_to(p_center) - r > DETOUR_LOOK) {
-			continue;
+		if (c.distance_to(p_center) - r > DETOUR_LOOK || c.distance_to(r_aim) < p.w - DETOUR_TOL) {
+			continue; // Далеко; цель в глубине самой преграды (центр кабины) — к ближней стороне, как было
 		}
 		sc[n] = c;
 		sr[n] = r;
